@@ -1,0 +1,40 @@
+# === Secrets — NEVER commit these ===
+.env
+
+# === Runtime data ===
+data/
+inbox/
+*.db
+*.db-shm
+*.db-wal
+
+# === Logs ===
+*.log
+*.err.log
+
+# === Python ===
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Claude Code local settings ===
+.claude/
