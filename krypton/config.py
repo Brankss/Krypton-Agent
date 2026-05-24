@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ProviderName = Literal["ollama_local", "ollama_cloud", "openrouter"]
+ProviderName = Literal["ollama_local", "ollama_cloud", "openrouter", "nvidia"]
 
 
 class Settings(BaseSettings):
@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
     openrouter_model: str = Field(default="anthropic/claude-sonnet-4", alias="OPENROUTER_MODEL")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
+
+    # ---- nvidia (NIM) --------------------------------------------------
+    nvidia_api_key: str = Field(default="", alias="NVIDIA_API_KEY")
+    nvidia_model: str = Field(default="moonshotai/kimi-k2.6", alias="NVIDIA_MODEL")
+    nvidia_base_url: str = Field(default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL")
+    nvidia_thinking: bool = Field(default=True, alias="NVIDIA_THINKING")
 
     # ---- telegram ------------------------------------------------------
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")

@@ -9,7 +9,7 @@ Multi-provider LLM • Surgical tool system • Persistent pattern learning • 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Async](https://img.shields.io/badge/async-asyncio-orange.svg)](https://docs.python.org/3/library/asyncio.html)
-[![Providers](https://img.shields.io/badge/providers-Ollama%20%7C%20OpenRouter-purple.svg)](#providers)
+[![Providers](https://img.shields.io/badge/providers-Ollama%20%7C%20OpenRouter%20%7C%20NVIDIA-purple.svg)](#providers)
 
 </div>
 
@@ -51,7 +51,7 @@ The design priority is **surgical precision over generality**. Each tool has the
 
 ## Feature highlights
 
-- **Three LLM backends, one interface** — Ollama local, Ollama Cloud, OpenRouter. Switch live with `/provider`.
+- **Four LLM backends, one interface** — Ollama local, Ollama Cloud, OpenRouter, NVIDIA NIM (free dev tier with Kimi K2.6, Qwen3, Nemotron, gpt-oss, DeepSeek V4 and more). Switch live with `/provider`.
 - **19 surgical tools** — filesystem, file CRUD, web search (Tavily + DDG), shell, Python exec, memory.
 - **Parallel tool dispatch** — independent calls fire concurrently, not one at a time.
 - **Smart context compaction** — identical tool outputs deduped to one entry with a `[repeated N×]` marker; head/tail truncation only as last resort.
@@ -335,6 +335,7 @@ In Telegram chat with your bot:
 | `/provider <name>` | Switch backend |
 | `/model <name>` | Switch model |
 | `/stop` | Cancel the currently-running turn |
+| `/thinking <on\|off>` | Toggle chain-of-thought reasoning (NVIDIA provider) |
 | `/reboot` | Restart the bot process (in-place) |
 
 The bot accepts **text, photos, voice notes, documents** — files are saved under `inbox/<chat_id>/` and the agent is told where to find them. The agent can send files back with the `send_file_to_user` tool.
@@ -415,6 +416,13 @@ Tool results larger than 16 KB are middle-elided before they ever enter the cont
 - OpenAI-compatible SSE.
 - Hundreds of models, pay-per-token: Claude, GPT-4o, Gemini, Llama, Mistral, etc.
 - Best when you want the absolute top-end models without managing keys for each provider.
+
+### `nvidia`
+- NVIDIA NIM API at `https://integrate.api.nvidia.com/v1`, OpenAI-compatible SSE.
+- **Free dev tier** with no per-day cap — get a key at [build.nvidia.com](https://build.nvidia.com).
+- 120+ models including Kimi K2.6, Qwen3-Coder 480B, Qwen3.5 397B, Nemotron Super/Ultra, DeepSeek V4 Pro, gpt-oss 120B, GLM 5.1.
+- Native chain-of-thought support — toggle on/off in Telegram with `/thinking on|off`. The agent surfaces reasoning inline marked with `_[thinking]_` tags so you can watch the model reason in real time.
+- Recommended default: `moonshotai/kimi-k2.6` (1T MoE with reasoning).
 
 Switch live in REPL or Telegram with `/provider <name>` and `/model <name>`. The agent rebuilds its provider object instantly without losing context.
 
