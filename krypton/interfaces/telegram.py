@@ -194,16 +194,51 @@ async def _cmd_stop(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("nothing to stop — no turn in flight.")
 
 
+# Convenience aliases — what the user types → canonical provider name.
+_PROVIDER_ALIASES = {
+    "ollama":       "ollama_local",
+    "local":        "ollama_local",
+    "ollama_local": "ollama_local",
+    "cloud":        "ollama_cloud",
+    "ollama_cloud": "ollama_cloud",
+    "router":       "openrouter",
+    "or":           "openrouter",
+    "openrouter":   "openrouter",
+    "nim":          "nvidia",
+    "nvidia":       "nvidia",
+}
+
+_PROVIDER_HELP = (
+    "usage: /provider <name>\n"
+    "available:\n"
+    "  ollama_local  (aliases: ollama, local)\n"
+    "  ollama_cloud  (alias: cloud)\n"
+    "  openrouter    (aliases: router, or)\n"
+    "  nvidia        (alias: nim)"
+)
+
+
 async def _cmd_provider(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
         return
     sess = _get_session(update.effective_chat.id)
     if not ctx.args:
-        await update.message.reply_text(f"current: {sess.agent.provider.name}")
+        await update.message.reply_text(
+            f"current: {sess.agent.provider.name}\n\n{_PROVIDER_HELP}"
+        )
         return
+
+    raw = ctx.args[0].strip().lower()
+    canonical = _PROVIDER_ALIASES.get(raw)
+    if canonical is None:
+        await update.message.reply_text(
+            f"unknown provider: {raw!r}\n\n{_PROVIDER_HELP}"
+        )
+        return
+
     from krypton.providers import build_provider
     try:
-        new_p = build_provider(ctx.args[0])  # type: ignore[arg-type]
+        new_p = build_provider(canonical)  # type: ignore[arg-type]
     except Exception as e:  # noqa: BLE001
         await update.message.reply_text(f"could not switch: {e}")
         return
