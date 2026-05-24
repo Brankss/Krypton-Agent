@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from krypton.config import settings
+from krypton.tools._fs_index import FileIndex, detect_everything, everything_search
 from krypton.tools.base import BaseTool, ToolResult
 
 # Directory names we never descend into unless the user opts in.
@@ -377,6 +378,140 @@ def _grep_file(path: Path, rx: "re.Pattern[str]", max_results: int, context: int
     return hits
 
 
+# ===========================================================================
+# instant_find  —  near-instant file search via persistent index + Everything
+# ===========================================================================
+
+
+# Module-level singletons; lazy-init on first use.
+_file_index: FileIndex | None = None
+_es_exe: str | None = None
+_es_checked = False
+# Stale threshold: if a root was last scanned more than this long ago, rebuild.
+_INDEX_STALE_SECONDS = 24 * 3600
+
+
+def _get_index() -> FileIndex:
+    global _file_index
+    if _file_index is None:
+        _file_index = FileIndex(settings.data_dir / "fs_index.db")
+    return _file_index
+
+
+def _get_everything() -> str | None:
+    global _es_exe, _es_checked
+    if not _es_checked:
+        _es_exe = detect_everything()
+        _es_checked = True
+    return _es_exe
+
+
+class InstantFindTool(BaseTool):
+    name = "instant_find"
+    description = (
+        "Near-instant filesystem search. Uses a persistent SQLite FTS5 index "
+        "(or Everything/voidtools if installed on Windows) so queries return "
+        "in milliseconds instead of seconds. First call on a new root costs "
+        "10-60s to build the index; every subsequent call is instant. "
+        "PREFER THIS OVER find_files for any search that might be re-run, or "
+        "for searches in large trees."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Substring like 'kimi' or glob like '*.py' / 'test_*'.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Root to search under. Defaults to workdir.",
+            },
+            "limit": {"type": "integer", "default": 100},
+            "kind": {
+                "type": "string",
+                "enum": ["file", "dir"],
+                "description": "Restrict to files or directories. Omit for both.",
+            },
+            "refresh": {
+                "type": "boolean",
+                "default": False,
+                "description": "Force rebuild the index for this root before searching.",
+            },
+            "include_hidden": {"type": "boolean", "default": False},
+        },
+        "required": ["query"],
+    }
+    timeout_s = 120.0  # generous for one-time index builds
+
+    async def run(
+        self,
+        query: str,
+        path: str | None = None,
+        limit: int = 100,
+        kind: str | None = None,
+        refresh: bool = False,
+        include_hidden: bool = False,
+    ) -> ToolResult:
+        root = _resolve(path)
+        root_str = str(root)
+        if not root.exists():
+            return ToolResult.failure(f"path does not exist: {root}")
+        if not root.is_dir():
+            return ToolResult.failure(f"not a directory: {root}")
+
+        # ----- Tier 1: Everything (voidtools) ---------------------------
+        es = _get_everything()
+        if es:
+            paths = await asyncio.to_thread(
+                everything_search, es, query, root=root_str, limit=limit, kind=kind
+            )
+            if paths:
+                header = (
+                    f"{len(paths)} match(es) for {query!r} via Everything "
+                    f"(< 50ms, USN-journal):"
+                )
+                return ToolResult.success(
+                    header + "\n" + "\n".join(paths),
+                    meta={"backend": "everything", "count": len(paths)},
+                )
+            # Everything returned nothing — fall through to SQLite (which may
+            # have a different freshness or include paths Everything skipped).
+
+        # ----- Tier 2: SQLite FTS5 -------------------------------------
+        idx = _get_index()
+        age = idx.root_age(root_str)
+        need_build = refresh or age is None or age > _INDEX_STALE_SECONDS
+
+        build_msg = ""
+        if need_build:
+            count, secs = await asyncio.to_thread(
+                idx.build, root_str, include_hidden=include_hidden
+            )
+            build_msg = f"[indexed {count} entries in {secs:.1f}s] "
+
+        rows = await asyncio.to_thread(
+            idx.search, query, root=root_str, limit=limit, kind=kind
+        )
+        if not rows:
+            return ToolResult.success(
+                f"{build_msg}no matches for {query!r} under {root}",
+                meta={"backend": "sqlite", "count": 0},
+            )
+        header = (
+            f"{build_msg}{len(rows)} match(es) for {query!r} under {root} "
+            f"(newest first):"
+        )
+        body = "\n".join(p for p, _mtime, _is_dir in rows)
+        return ToolResult.success(
+            header + "\n" + body,
+            meta={"backend": "sqlite", "count": len(rows)},
+        )
+
+
+# ---------------------------------------------------------------------------
+
+
 def _human_size(n: int) -> str:
     for unit in ("B", "K", "M", "G", "T"):
         if n < 1024:
@@ -389,4 +524,4 @@ def _human_size(n: int) -> str:
 
 
 def tools() -> list[Any]:
-    return [ListDirectoryTool(), FindFilesTool(), GrepTool()]
+    return [ListDirectoryTool(), FindFilesTool(), InstantFindTool(), GrepTool()]
