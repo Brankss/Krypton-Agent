@@ -335,7 +335,7 @@ In Telegram chat with your bot:
 | `/provider <name>` | Switch backend |
 | `/model <name>` | Switch model |
 | `/stop` | Cancel the currently-running turn |
-| `/thinking <on\|off>` | Toggle chain-of-thought reasoning (NVIDIA provider) |
+| `/reasoning <none\|low\|medium\|high>` | Set chain-of-thought effort (NVIDIA provider) |
 | `/reboot` | Restart the bot process (in-place) |
 
 The bot accepts **text, photos, voice notes, documents** — files are saved under `inbox/<chat_id>/` and the agent is told where to find them. The agent can send files back with the `send_file_to_user` tool.
@@ -421,8 +421,9 @@ Tool results larger than 16 KB are middle-elided before they ever enter the cont
 - NVIDIA NIM API at `https://integrate.api.nvidia.com/v1`, OpenAI-compatible SSE.
 - **Free dev tier** with no per-day cap — get a key at [build.nvidia.com](https://build.nvidia.com).
 - 120+ models including Kimi K2.6, Qwen3-Coder 480B, Qwen3.5 397B, Nemotron Super/Ultra, DeepSeek V4 Pro, gpt-oss 120B, GLM 5.1.
-- Native chain-of-thought support — toggle on/off in Telegram with `/thinking on|off`. The agent surfaces reasoning inline marked with `_[thinking]_` tags so you can watch the model reason in real time.
-- Recommended default: `moonshotai/kimi-k2.6` (1T MoE with reasoning).
+- Native chain-of-thought support with **4-level effort dial** — `/reasoning none|low|medium|high` in Telegram. Sends both `reasoning_effort` (Nemotron / gpt-oss convention) and `chat_template_kwargs.thinking` (Kimi / Qwen3 convention) so a single command works across the whole catalog.
+- The agent surfaces reasoning inline marked with `_[thinking]_` tags so you can watch the model reason in real time.
+- Recommended default: `nvidia/nemotron-3-super-120b-a12b` with `reasoning_effort=low` — fastest reasoning model on NIM with NVIDIA's own infra priority. For pure agentic tool use try `moonshotai/kimi-k2.6`.
 
 Switch live in REPL or Telegram with `/provider <name>` and `/model <name>`. The agent rebuilds its provider object instantly without losing context.
 

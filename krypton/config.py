@@ -41,9 +41,10 @@ class Settings(BaseSettings):
 
     # ---- nvidia (NIM) --------------------------------------------------
     nvidia_api_key: str = Field(default="", alias="NVIDIA_API_KEY")
-    nvidia_model: str = Field(default="moonshotai/kimi-k2.6", alias="NVIDIA_MODEL")
+    nvidia_model: str = Field(default="nvidia/nemotron-3-super-120b-a12b", alias="NVIDIA_MODEL")
     nvidia_base_url: str = Field(default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL")
-    nvidia_thinking: bool = Field(default=True, alias="NVIDIA_THINKING")
+    # one of: none | low | medium | high  (or empty for model default)
+    nvidia_reasoning_effort: str = Field(default="low", alias="NVIDIA_REASONING_EFFORT")
 
     # ---- telegram ------------------------------------------------------
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")

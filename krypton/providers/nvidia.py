@@ -4,20 +4,27 @@ NVIDIA's hosted inference endpoint at https://integrate.api.nvidia.com/v1
 speaks the OpenAI Chat Completions wire format. Auth via Bearer token,
 streaming via Server-Sent Events.
 
-Per-model knobs (thinking, reasoning_effort, etc) are routed via
-`extra_body` which NIM forwards to the underlying inference engine. We
-expose a single `thinking: bool` toggle that gets translated to
-`chat_template_kwargs.thinking` — the convention used by Kimi K2-Thinking,
-Qwen3, Nemotron-Nano-9B-V2 and most other thinking-capable NIM models.
+Per-model knobs (thinking, reasoning_effort, etc) are routed via the
+payload directly — NIM accepts OpenAI-style `reasoning_effort` plus
+arbitrary `chat_template_kwargs` that get forwarded to the inference
+engine. We expose a single `reasoning_effort` knob:
 
-If you need finer control (e.g. `reasoning_effort` for gpt-oss models)
-set `provider.extra_body` directly from outside.
+  "none"   → reasoning disabled
+  "low"    → minimal reasoning
+  "medium" → balanced
+  "high"   → maximum reasoning depth
+  None     → model default
+
+This works on Nemotron-3-Super / Nemotron-Nano-9B-V2 / gpt-oss-120b and
+most other reasoning-capable NIM models. For Kimi K2.6 / Qwen3 which use
+the `thinking` boolean instead, we translate automatically:
+"none" → thinking=false, anything else → thinking=true.
 """
 from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 import httpx
 
@@ -33,6 +40,10 @@ from krypton.providers.base import (
 )
 
 
+ReasoningEffort = Literal["none", "low", "medium", "high"]
+_VALID_EFFORTS = {"none", "low", "medium", "high"}
+
+
 class NvidiaProvider(LLMProvider):
     def __init__(
         self,
@@ -40,7 +51,7 @@ class NvidiaProvider(LLMProvider):
         model: str,
         api_key: str,
         base_url: str = "https://integrate.api.nvidia.com/v1",
-        thinking: bool = True,
+        reasoning_effort: ReasoningEffort | None = "low",
         connect_timeout: float = 10.0,
         read_timeout: float = 600.0,
     ) -> None:
@@ -48,8 +59,10 @@ class NvidiaProvider(LLMProvider):
             raise RuntimeError("NVIDIA_API_KEY is required to use the nvidia provider")
         self.name = "nvidia"
         self.model = model
-        self.thinking = thinking
-        # Free-form per-request overrides. /thinking writes here; users can poke too.
+        self._reasoning_effort: ReasoningEffort | None = None
+        self.reasoning_effort = reasoning_effort  # type: ignore[assignment]
+        # Free-form per-request overrides. Users can set this from outside if
+        # they want to inject arbitrary NIM-specific parameters.
         self.extra_body: dict[str, Any] = {}
         self._base = base_url.rstrip("/")
         self._client = httpx.AsyncClient(
@@ -60,6 +73,29 @@ class NvidiaProvider(LLMProvider):
             },
             timeout=httpx.Timeout(read_timeout, connect=connect_timeout),
         )
+
+    # --- reasoning_effort property with validation -------------------
+    @property
+    def reasoning_effort(self) -> ReasoningEffort | None:
+        return self._reasoning_effort
+
+    @reasoning_effort.setter
+    def reasoning_effort(self, value: str | None) -> None:
+        if value is None:
+            self._reasoning_effort = None
+            return
+        v = value.strip().lower()
+        if v not in _VALID_EFFORTS:
+            raise ValueError(
+                f"reasoning_effort must be one of {sorted(_VALID_EFFORTS)} or None, got {value!r}"
+            )
+        self._reasoning_effort = v  # type: ignore[assignment]
+
+    # --- backwards-compat alias --------------------------------------
+    @property
+    def thinking(self) -> bool:
+        """True if any reasoning is enabled (any level except 'none')."""
+        return self._reasoning_effort not in (None, "none")
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -84,17 +120,26 @@ class NvidiaProvider(LLMProvider):
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        # Thinking toggle — convention used by Kimi K2-Thinking / Qwen3 / Nemotron
-        # via the chat template. Harmless for models that ignore unknown kwargs.
-        ctk = {"thinking": bool(self.thinking)}
-        if self.extra_body:
-            # explicit extra_body wins
-            merged_ctk = dict(ctk)
-            merged_ctk.update(self.extra_body.get("chat_template_kwargs") or {})
-            payload.update({k: v for k, v in self.extra_body.items() if k != "chat_template_kwargs"})
-            payload["chat_template_kwargs"] = merged_ctk
-        else:
+        # --- reasoning controls ---
+        # We send BOTH conventions so a single setting works across the
+        # heterogeneous NIM catalog:
+        #   * reasoning_effort=<low|medium|high>   (Nemotron, gpt-oss)
+        #   * chat_template_kwargs.thinking=bool    (Kimi K2.6, Qwen3)
+        # Models ignore unknown fields, so this is safe.
+        eff = self._reasoning_effort
+        if eff is not None:
+            ctk: dict[str, Any] = {"thinking": eff != "none"}
+            if eff in ("low", "medium", "high"):
+                payload["reasoning_effort"] = eff
             payload["chat_template_kwargs"] = ctk
+
+        # explicit extra_body wins — merges on top
+        if self.extra_body:
+            user_ctk = self.extra_body.get("chat_template_kwargs") or {}
+            merged_ctk = {**(payload.get("chat_template_kwargs") or {}), **user_ctk}
+            payload.update({k: v for k, v in self.extra_body.items() if k != "chat_template_kwargs"})
+            if merged_ctk:
+                payload["chat_template_kwargs"] = merged_ctk
 
         return payload
 

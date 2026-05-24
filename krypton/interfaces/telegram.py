@@ -237,37 +237,43 @@ async def _cmd_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def _cmd_thinking(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle chain-of-thought reasoning on/off (NVIDIA provider).
+async def _cmd_reasoning(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set chain-of-thought reasoning effort (NVIDIA provider).
 
     Usage:
-        /thinking          -> show current state
-        /thinking on|off   -> set state
+        /reasoning                      -> show current level
+        /reasoning none|low|medium|high -> set level
+
+    Aliases: 'off' = 'none', 'on' = 'low'
     """
     if not _authorized(update):
         return
     sess = _get_session(update.effective_chat.id)
     prov = sess.agent.provider
-    if not hasattr(prov, "thinking"):
+    if not hasattr(prov, "reasoning_effort"):
         await update.message.reply_text(
-            f"provider '{prov.name}' has no thinking toggle. "
+            f"provider '{prov.name}' has no reasoning_effort knob. "
             f"Switch with /provider nvidia first."
         )
         return
     if not ctx.args:
-        state = "on" if getattr(prov, "thinking", False) else "off"
-        await update.message.reply_text(f"thinking: {state}")
+        cur = prov.reasoning_effort or "default"  # type: ignore[attr-defined]
+        await update.message.reply_text(f"reasoning_effort: {cur}")
         return
+
     arg = ctx.args[0].strip().lower()
-    if arg in ("on", "true", "1", "yes"):
-        prov.thinking = True  # type: ignore[attr-defined]
-    elif arg in ("off", "false", "0", "no"):
-        prov.thinking = False  # type: ignore[attr-defined]
-    else:
-        await update.message.reply_text("usage: /thinking on|off")
+    # convenience aliases
+    if arg == "off":
+        arg = "none"
+    elif arg == "on":
+        arg = "low"
+
+    try:
+        prov.reasoning_effort = arg  # type: ignore[attr-defined]
+    except ValueError as e:
+        await update.message.reply_text(f"{e}")
         return
-    state = "on" if prov.thinking else "off"  # type: ignore[attr-defined]
-    await update.message.reply_text(f"thinking -> {state}")
+    await update.message.reply_text(f"reasoning_effort -> {prov.reasoning_effort}")  # type: ignore[attr-defined]
 
 
 async def _cmd_reboot(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -660,7 +666,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("provider", _cmd_provider))
     app.add_handler(CommandHandler("model", _cmd_model))
     app.add_handler(CommandHandler("status", _cmd_status))
-    app.add_handler(CommandHandler("thinking", _cmd_thinking))
+    app.add_handler(CommandHandler("reasoning", _cmd_reasoning))
+    app.add_handler(CommandHandler("thinking", _cmd_reasoning))  # alias
     app.add_handler(CommandHandler("reboot", _cmd_reboot))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_text))
     app.add_handler(MessageHandler(filters.Document.ALL, _on_document))

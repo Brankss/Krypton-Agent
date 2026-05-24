@@ -30,10 +30,11 @@ def build_provider(name: ProviderName | None = None) -> LLMProvider:
             base_url=settings.openrouter_base_url,
         )
     if chosen == "nvidia":
+        eff = (settings.nvidia_reasoning_effort or "").strip().lower() or None
         return NvidiaProvider(
             model=settings.nvidia_model,
             api_key=settings.nvidia_api_key,
             base_url=settings.nvidia_base_url,
-            thinking=settings.nvidia_thinking,
+            reasoning_effort=eff,  # type: ignore[arg-type]
         )
     raise ValueError(f"unknown provider: {chosen}")
