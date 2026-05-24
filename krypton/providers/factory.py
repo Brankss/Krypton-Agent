@@ -11,17 +11,21 @@ from krypton.providers.openrouter import OpenRouterProvider
 def build_provider(name: ProviderName | None = None) -> LLMProvider:
     chosen: ProviderName = name or settings.provider
     if chosen == "ollama_local":
+        eff = (settings.ollama_local_reasoning_effort or "").strip().lower() or None
         return OllamaProvider(
             name="ollama_local",
             host=settings.ollama_local_host,
             model=settings.ollama_local_model,
+            reasoning_effort=eff,  # type: ignore[arg-type]
         )
     if chosen == "ollama_cloud":
+        eff = (settings.ollama_cloud_reasoning_effort or "").strip().lower() or None
         return OllamaProvider(
             name="ollama_cloud",
             host=settings.ollama_cloud_host,
             model=settings.ollama_cloud_model,
             api_key=settings.ollama_cloud_api_key,
+            reasoning_effort=eff,  # type: ignore[arg-type]
         )
     if chosen == "openrouter":
         return OpenRouterProvider(

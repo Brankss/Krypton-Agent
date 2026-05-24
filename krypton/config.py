@@ -28,11 +28,14 @@ class Settings(BaseSettings):
     # ---- ollama local --------------------------------------------------
     ollama_local_host: str = Field(default="http://127.0.0.1:11434", alias="OLLAMA_LOCAL_HOST")
     ollama_local_model: str = Field(default="qwen2.5-coder:7b", alias="OLLAMA_LOCAL_MODEL")
+    # one of: none | low | medium | high  (or empty for model default)
+    ollama_local_reasoning_effort: str = Field(default="", alias="OLLAMA_LOCAL_REASONING_EFFORT")
 
     # ---- ollama cloud --------------------------------------------------
     ollama_cloud_host: str = Field(default="https://ollama.com", alias="OLLAMA_CLOUD_HOST")
     ollama_cloud_api_key: str = Field(default="", alias="OLLAMA_CLOUD_API_KEY")
     ollama_cloud_model: str = Field(default="gpt-oss:120b", alias="OLLAMA_CLOUD_MODEL")
+    ollama_cloud_reasoning_effort: str = Field(default="", alias="OLLAMA_CLOUD_REASONING_EFFORT")
 
     # ---- openrouter ----------------------------------------------------
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")

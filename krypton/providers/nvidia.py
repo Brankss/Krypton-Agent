@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, AsyncIterator, Literal
+from typing import Any, AsyncIterator
 
 import httpx
 
 from krypton.providers._msg import messages_to_openai
+from krypton.providers._thinking import ReasoningEffort, normalize_effort, strip_think
 from krypton.providers.base import (
     Done,
     LLMProvider,
@@ -38,10 +39,6 @@ from krypton.providers.base import (
     ToolCall,
     ToolCallDelta,
 )
-
-
-ReasoningEffort = Literal["none", "low", "medium", "high"]
-_VALID_EFFORTS = {"none", "low", "medium", "high"}
 
 
 class NvidiaProvider(LLMProvider):
@@ -81,15 +78,7 @@ class NvidiaProvider(LLMProvider):
 
     @reasoning_effort.setter
     def reasoning_effort(self, value: str | None) -> None:
-        if value is None:
-            self._reasoning_effort = None
-            return
-        v = value.strip().lower()
-        if v not in _VALID_EFFORTS:
-            raise ValueError(
-                f"reasoning_effort must be one of {sorted(_VALID_EFFORTS)} or None, got {value!r}"
-            )
-        self._reasoning_effort = v  # type: ignore[assignment]
+        self._reasoning_effort = normalize_effort(value)
 
     # --- backwards-compat alias --------------------------------------
     @property
@@ -193,7 +182,7 @@ class NvidiaProvider(LLMProvider):
                 # before forwarding. Carry partial tokens across chunks so we
                 # don't accidentally split a tag boundary.
                 if (txt := delta.get("content")):
-                    clean, in_inline_think, content_carry = _strip_think(
+                    clean, in_inline_think, content_carry = strip_think(
                         txt, in_inline_think, content_carry
                     )
                     if clean:
@@ -241,62 +230,3 @@ class NvidiaProvider(LLMProvider):
             yield TextDelta(content_carry)
 
         yield Done(finish_reason=finish_reason, usage=usage)
-
-
-# ---------------------------------------------------------------------------
-
-
-_THINK_OPEN = "<think>"
-_THINK_CLOSE = "</think>"
-
-
-def _longest_prefix_suffix(s: str, tag: str) -> int:
-    """Length of the longest non-empty suffix of `s` that is a prefix of `tag`."""
-    max_k = min(len(s), len(tag) - 1)
-    for k in range(max_k, 0, -1):
-        if tag.startswith(s[-k:]):
-            return k
-    return 0
-
-
-def _strip_think(chunk: str, in_think: bool, carry: str) -> tuple[str, bool, str]:
-    """Strip <think>...</think> blocks from a streaming content chunk.
-
-    Returns (visible_text, new_in_think_state, new_carry).
-
-    `carry` holds the tail of the previous chunk that might be a partial tag —
-    e.g. if a chunk ended with "<thi" we hold those 4 chars so we can detect
-    "<thi" + "nk>" = open tag when the next chunk arrives.
-    """
-    buf = carry + chunk
-    out: list[str] = []
-    i = 0
-
-    while i < len(buf):
-        if in_think:
-            close_idx = buf.find(_THINK_CLOSE, i)
-            if close_idx < 0:
-                # Still inside think and no close tag in sight. Hold only the
-                # tail that could be the start of </think>; drop the rest.
-                rest = buf[i:]
-                k = _longest_prefix_suffix(rest, _THINK_CLOSE)
-                return ("".join(out), True, rest[-k:] if k else "")
-            i = close_idx + len(_THINK_CLOSE)
-            in_think = False
-        else:
-            open_idx = buf.find(_THINK_OPEN, i)
-            if open_idx < 0:
-                # No more open tag in this buffer. Emit everything up to
-                # whatever tail could be the start of <think>.
-                rest = buf[i:]
-                k = _longest_prefix_suffix(rest, _THINK_OPEN)
-                emit_until = len(rest) - k
-                if emit_until > 0:
-                    out.append(rest[:emit_until])
-                return ("".join(out), False, rest[emit_until:])
-            if open_idx > i:
-                out.append(buf[i:open_idx])
-            i = open_idx + len(_THINK_OPEN)
-            in_think = True
-
-    return ("".join(out), in_think, "")
