@@ -158,8 +158,11 @@ class NvidiaProvider(LLMProvider):
         buf: dict[int, dict[str, Any]] = {}
         finish_reason = "stop"
         usage: dict[str, int] = {}
-        # Track whether we've emitted the visible thinking tag yet
-        in_reasoning = False
+
+        # State for stripping <think>...</think> blocks that some Nemotron /
+        # DeepSeek variants embed inside the regular `content` field.
+        in_inline_think = False
+        content_carry = ""
 
         url = f"{self._base}/chat/completions"
         async with self._client.stream("POST", url, json=payload) as resp:
@@ -181,20 +184,20 @@ class NvidiaProvider(LLMProvider):
                 choice = (chunk.get("choices") or [{}])[0]
                 delta = choice.get("delta") or {}
 
-                # Some NIM models stream a separate `reasoning_content` field
-                # (DeepSeek-R1 / Nemotron). Surface it inline so the UI can see
-                # the chain-of-thought when /thinking is on, but mark it.
-                if (rc := delta.get("reasoning_content")):
-                    if not in_reasoning:
-                        yield TextDelta("\n_[thinking]_\n")
-                        in_reasoning = True
-                    yield TextDelta(rc)
+                # `reasoning_content` is the model's private chain-of-thought
+                # (DeepSeek-R1 / Nemotron / gpt-oss). We silently consume it —
+                # the user only wants the final answer.
+                _ = delta.get("reasoning_content")
 
+                # Content channel — strip inline <think>...</think> blocks
+                # before forwarding. Carry partial tokens across chunks so we
+                # don't accidentally split a tag boundary.
                 if (txt := delta.get("content")):
-                    if in_reasoning:
-                        yield TextDelta("\n_[/thinking]_\n\n")
-                        in_reasoning = False
-                    yield TextDelta(txt)
+                    clean, in_inline_think, content_carry = _strip_think(
+                        txt, in_inline_think, content_carry
+                    )
+                    if clean:
+                        yield TextDelta(clean)
 
                 for tc in delta.get("tool_calls") or []:
                     idx = tc.get("index", 0)
@@ -233,4 +236,67 @@ class NvidiaProvider(LLMProvider):
                 )
             )
 
+        # flush any trailing carry that wasn't a tag prefix after all
+        if content_carry and not in_inline_think:
+            yield TextDelta(content_carry)
+
         yield Done(finish_reason=finish_reason, usage=usage)
+
+
+# ---------------------------------------------------------------------------
+
+
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+def _longest_prefix_suffix(s: str, tag: str) -> int:
+    """Length of the longest non-empty suffix of `s` that is a prefix of `tag`."""
+    max_k = min(len(s), len(tag) - 1)
+    for k in range(max_k, 0, -1):
+        if tag.startswith(s[-k:]):
+            return k
+    return 0
+
+
+def _strip_think(chunk: str, in_think: bool, carry: str) -> tuple[str, bool, str]:
+    """Strip <think>...</think> blocks from a streaming content chunk.
+
+    Returns (visible_text, new_in_think_state, new_carry).
+
+    `carry` holds the tail of the previous chunk that might be a partial tag —
+    e.g. if a chunk ended with "<thi" we hold those 4 chars so we can detect
+    "<thi" + "nk>" = open tag when the next chunk arrives.
+    """
+    buf = carry + chunk
+    out: list[str] = []
+    i = 0
+
+    while i < len(buf):
+        if in_think:
+            close_idx = buf.find(_THINK_CLOSE, i)
+            if close_idx < 0:
+                # Still inside think and no close tag in sight. Hold only the
+                # tail that could be the start of </think>; drop the rest.
+                rest = buf[i:]
+                k = _longest_prefix_suffix(rest, _THINK_CLOSE)
+                return ("".join(out), True, rest[-k:] if k else "")
+            i = close_idx + len(_THINK_CLOSE)
+            in_think = False
+        else:
+            open_idx = buf.find(_THINK_OPEN, i)
+            if open_idx < 0:
+                # No more open tag in this buffer. Emit everything up to
+                # whatever tail could be the start of <think>.
+                rest = buf[i:]
+                k = _longest_prefix_suffix(rest, _THINK_OPEN)
+                emit_until = len(rest) - k
+                if emit_until > 0:
+                    out.append(rest[:emit_until])
+                return ("".join(out), False, rest[emit_until:])
+            if open_idx > i:
+                out.append(buf[i:open_idx])
+            i = open_idx + len(_THINK_OPEN)
+            in_think = True
+
+    return ("".join(out), in_think, "")
