@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Callable, Awaitable
+from typing import Callable, Awaitable
 
 from krypton.config import settings
 from krypton.core.context import ConversationContext
@@ -26,7 +26,6 @@ from krypton.providers.base import (
     Done,
     LLMProvider,
     Message,
-    StreamEvent,
     TextDelta,
     ToolCall,
     ToolCallDelta,
@@ -154,10 +153,7 @@ class Agent:
         # Iteration cap hit. If the last entry is an assistant with unanswered
         # tool_calls, drop those tool_calls so the next turn's context isn't
         # structurally broken (a tool_call without a matching tool response).
-        if self.context._entries:  # type: ignore[attr-defined]
-            last = self.context._entries[-1]  # type: ignore[attr-defined]
-            if last.msg.role == "assistant" and last.msg.tool_calls:
-                last.msg.tool_calls = []
+        self.context.drop_trailing_unanswered_tool_calls()
         result.final_text = "(max iterations reached without final answer)"
         result.aborted = True
         return result

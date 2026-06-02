@@ -10,7 +10,6 @@ from krypton.core.agent import Agent
 from krypton.core.context import ConversationContext
 from krypton.memory.store import MemoryStore
 from krypton.providers import build_provider
-from krypton.tools import default_registry
 from krypton.tools.base import Tool
 from krypton.tools.files import tools as file_tools
 from krypton.tools.filesystem import tools as fs_tools
@@ -38,11 +37,6 @@ def build_agent(
     registry.register_many(memory_tools(memory))
     if extra_tools:
         registry.register_many(extra_tools)
-
-    # also expose the default_registry singleton for callers that introspect it
-    default_registry._tools.clear()  # type: ignore[attr-defined]
-    for t in registry.all():
-        default_registry._tools.setdefault(t.name, t)  # type: ignore[attr-defined]
 
     provider = build_provider(provider_name)
     ctx = ConversationContext(target_budget=settings.context_budget)

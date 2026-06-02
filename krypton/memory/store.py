@@ -189,6 +189,84 @@ class MemoryStore:
         scored.sort(key=lambda s: s[0], reverse=True)
         return [p for _, p in scored[:limit]]
 
+    async def remember(
+        self,
+        kind: PatternKind,
+        title: str,
+        body: str,
+        tags: Iterable[str] = (),
+        *,
+        sim_threshold: float = 0.55,
+    ) -> tuple[Pattern, bool]:
+        """Atomically dedup-or-insert a pattern.
+
+        Looks for a near-duplicate (same kind, Jaccard ≥ `sim_threshold` on
+        title tokens) and merges into it; otherwise inserts a new row. The
+        whole check-then-act runs under the write lock in one worker thread,
+        so concurrent calls (parallel tool dispatch) can NEVER both pass the
+        duplicate check and double-insert — closing the TOCTOU that the old
+        search-then-add path had.
+
+        Returns `(pattern, merged)` — `merged` is True when an existing
+        pattern was updated rather than a new one created.
+        """
+        tags_l = sorted({t.lower().strip() for t in tags if t.strip()})
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._remember_sync, kind, title.strip(), body.strip(), tags_l, sim_threshold
+            )
+
+    def _remember_sync(
+        self,
+        kind: PatternKind,
+        title: str,
+        body: str,
+        tags_l: list[str],
+        sim_threshold: float,
+    ) -> tuple[Pattern, bool]:
+        now = time.time()
+        # Candidate search (same shape as search_patterns stage 1) — inline so
+        # it shares the locked thread with the write that follows it.
+        tokens = [t for t in _tokenize(title + " " + body) if len(t) >= 3][:8]
+        candidates: list[Pattern] = []
+        if tokens:
+            clauses, params = [], []
+            for t in tokens:
+                like = f"%{t}%"
+                clauses.append("LOWER(title) LIKE ? OR LOWER(body) LIKE ? OR LOWER(tags_json) LIKE ?")
+                params.extend([like, like, like])
+            where = " OR ".join(f"({c})" for c in clauses)
+            sql = f"SELECT * FROM patterns WHERE {where} ORDER BY updated_at DESC LIMIT 50"
+            candidates = [_row_to_pattern(r) for r in self._conn.execute(sql, params).fetchall()]
+
+        title_tokens = _tokset(title)
+        for ex in candidates:
+            if ex.kind != kind:
+                continue
+            if _jaccard(title_tokens, _tokset(ex.title)) >= sim_threshold:
+                merged_tags = sorted(set(ex.tags) | set(tags_l))
+                new_body = ex.body if body in ex.body else (ex.body.rstrip() + "\n---\n" + body)[:2000]
+                self._conn.execute(
+                    "UPDATE patterns SET body=?, tags_json=?, updated_at=? WHERE id=?",
+                    (new_body, json.dumps(merged_tags), now, ex.id),
+                )
+                return (
+                    Pattern(id=ex.id, kind=ex.kind, title=ex.title, body=new_body,
+                            tags=merged_tags, uses=ex.uses, created_at=ex.created_at, updated_at=now),
+                    True,
+                )
+
+        cur = self._conn.execute(
+            "INSERT INTO patterns(kind,title,body,tags_json,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (kind, title, body, json.dumps(tags_l), now, now),
+        )
+        pid = cur.lastrowid or 0
+        return (
+            Pattern(id=pid, kind=kind, title=title, body=body, tags=tags_l,
+                    created_at=now, updated_at=now),
+            False,
+        )
+
     # ----- facts (key/value) -------------------------------------------
     async def set_fact(self, key: str, value: str) -> None:
         async with self._lock:
@@ -265,3 +343,15 @@ def _row_to_pattern(row: sqlite3.Row) -> Pattern:
 def _tokenize(text: str) -> list[str]:
     import re
     return re.findall(r"[a-z0-9_\-]+", text.lower())
+
+
+def _tokset(s: str) -> set[str]:
+    import re
+    return {t for t in re.findall(r"[a-z0-9_]+", s.lower()) if len(t) >= 3}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0

@@ -19,7 +19,7 @@ Multi-provider LLM • Surgical tool system • Persistent pattern learning • 
 
 Krypton is a **local-first autonomous agent** designed to run on your own hardware and operate on your real system — files, shell, network, Python — with zero confirmation prompts and persistent memory across reboots. You talk to it via a terminal REPL or a private Telegram bot from your phone, and it does the work.
 
-It's not a chatbot, not a playground demo, not a wrapper around someone else's framework. It's a single ~3k-line Python codebase you can read top-to-bottom in an afternoon, designed to be the **personal assistant that lives on your laptop and gets shit done.**
+It's not a chatbot, not a playground demo, not a wrapper around someone else's framework. It's a single ~5k-line Python codebase you can read top-to-bottom in an afternoon, designed to be the **personal assistant that lives on your laptop and gets shit done.**
 
 ---
 
@@ -43,7 +43,7 @@ Krypton is none of those. Concretely:
 | **Remote access** | Web UI | Private Telegram bot, photos/voice/files inbound |
 | **Tool result blow-up** | Floods context → crash | 16 KB cap + middle-elision per tool call |
 | **Identical errors spam** | 50 copies of the same line | Fingerprint dedup keeps 1 |
-| **Lines of framework** | ~50 000 | ~3 000 |
+| **Lines of framework** | ~50 000 | ~5 000 |
 
 The design priority is **surgical precision over generality**. Each tool has the narrowest possible scope, the registry caches its schema, the prompt builder caches the static portion, the context manager drops redundancy *before* truncating. Everything is async, everything streams, everything pools its connections.
 
@@ -52,7 +52,7 @@ The design priority is **surgical precision over generality**. Each tool has the
 ## Feature highlights
 
 - **Four LLM backends, one interface** — Ollama local, Ollama Cloud, OpenRouter, NVIDIA NIM (free dev tier with Kimi K2.6, Qwen3, Nemotron, gpt-oss, DeepSeek V4 and more). Switch live with `/provider`.
-- **19 surgical tools** — filesystem, file CRUD, web search (Tavily + DDG), shell, Python exec, memory.
+- **19 surgical tools** — filesystem, indexed instant-find, file CRUD, web search (Tavily + DDG), shell, Python exec, memory.
 - **Parallel tool dispatch** — independent calls fire concurrently, not one at a time.
 - **Smart context compaction** — identical tool outputs deduped to one entry with a `[repeated N×]` marker; head/tail truncation only as last resort.
 - **Persistent memory** — patterns and facts survive restarts; conversations restored per Telegram chat.
@@ -117,13 +117,16 @@ krypton/
 │   ├── base.py            # LLMProvider protocol, Message/StreamEvent types
 │   ├── ollama.py          # Ollama local + cloud (same wire protocol)
 │   ├── openrouter.py      # OpenAI-compatible SSE
+│   ├── nvidia.py          # NVIDIA NIM (OpenAI-compatible SSE + reasoning dial)
 │   ├── factory.py         # build_provider(name)
-│   └── _msg.py            # Cross-provider message normalization
+│   ├── _msg.py            # Cross-provider message normalization
+│   └── _thinking.py       # reasoning_effort + streaming <think> stripper
 │
 ├── tools/
 │   ├── base.py            # Tool ABC, ToolResult, timeout wrapper
 │   ├── registry.py        # Register/dispatch + cached schema + per-tool stats
-│   ├── filesystem.py      # list_directory, find_files, grep
+│   ├── filesystem.py      # list_directory, find_files, instant_find, grep
+│   ├── _fs_index.py       # FTS5 index + Everything backend for instant_find
 │   ├── files.py           # read/write/edit/append/delete/stat
 │   ├── web.py             # web_search, fetch_url (shared httpx pool)
 │   ├── shell.py           # execute_python, powershell, shell
@@ -348,23 +351,30 @@ The bot accepts **text, photos, voice notes, documents** — files are saved und
 |---|---|---|---|
 | 1 | `list_directory` | Compact directory listing | Skips `node_modules`, `.git`, `__pycache__` |
 | 2 | `find_files` | Recursive glob | Uses `scandir`, prunes junk dirs |
-| 3 | `grep` | Multi-file regex search | Bounded concurrency (semaphore=64), early-stop, binary skip |
-| 4 | `read_file` | Read with offset/limit | Streaming — no full-file load for slices |
-| 5 | `write_file` | Atomic write | tmp + rename |
-| 6 | `edit_file` | Exact-string replacement | Fails if the match isn't unique |
-| 7 | `append_file` | Append to file | |
-| 8 | `delete_path` | Delete file or dir | |
-| 9 | `stat_path` | File metadata | |
-| 10 | `web_search` | Tavily or DuckDuckGo | 5-min cache, snippet cap 240 chars |
-| 11 | `fetch_url` | Fetch + HTML→text | Shared `httpx` pool |
-| 12 | `execute_python` | Run Python subprocess | `-I` isolated mode, configurable timeout |
-| 13 | `powershell` | PowerShell `-NoProfile -NonInteractive` | Windows only |
+| 3 | `instant_find` | Near-instant search via persistent FTS5 index (or Everything) | First scan builds the index; every later query is milliseconds |
+| 4 | `grep` | Multi-file regex search | Bounded concurrency (semaphore=64), early-stop, binary skip |
+| 5 | `read_file` | Read with offset/limit | Streaming — no full-file load for slices |
+| 6 | `write_file` | Atomic write | tmp + rename |
+| 7 | `edit_file` | Exact-string replacement | Fails if the match isn't unique |
+| 8 | `append_file` | Append to file | |
+| 9 | `delete_path` | Delete file or dir | Hard guard: refuses workdir / data / home / filesystem root |
+| 10 | `stat_path` | File metadata | |
+| 11 | `web_search` | Tavily or DuckDuckGo | 5-min cache, snippet cap 240 chars |
+| 12 | `fetch_url` | Fetch + HTML→text | Shared `httpx` pool |
+| 13 | `execute_python` | Run Python subprocess | `-I` isolated mode, configurable timeout |
 | 14 | `shell` | `cmd.exe` / `sh -c` | |
-| 15 | `remember_pattern` | Store a learned recipe / error / optimization | Jaccard auto-dedup ≥ 0.55 |
+| 15 | `remember_pattern` | Store a learned recipe / error / optimization | **Atomic** Jaccard auto-dedup ≥ 0.55 (safe under parallel dispatch) |
 | 16 | `recall_patterns` | Keyword search over patterns | |
 | 17 | `forget_pattern` | Delete stale patterns | |
-| 18 | `note_fact` / `get_fact` | Key/value durable facts | Auto-injected into every prompt |
-| 19 | `send_file_to_user` | Send a file via Telegram | Only registered when running the bot |
+| 18 | `note_fact` | Set a durable key/value fact | Auto-injected into every prompt |
+| 19 | `get_fact` | Read a fact (or list all) | |
+
+Two more register **conditionally**, for up to 21 total:
+
+| Tool | Purpose | When |
+|---|---|---|
+| `powershell` | PowerShell `-NoProfile -NonInteractive` | Windows only |
+| `send_file_to_user` | Send a file back via Telegram | Only when running the bot |
 
 ---
 
@@ -459,6 +469,11 @@ The agent's system prompt explicitly disallows confirmation-seeking. The forbidd
 
 The one exception: genuinely destructive or irreversible operations (mass delete, schema migration, data-loss risk) — the agent is instructed to propose a 3-bullet plan and ask once. Everything else: act.
 
+Autonomy is never *unbounded*, though — two **code-level** guards back the prompt up, because a guard you can only ask a 7B model to respect is not a guard:
+
+- **`delete_path` refuses protected roots.** It will not remove the workdir, the data dir, your home directory, a filesystem root, or any *ancestor* of those — so a misfired `delete_path('.', recursive=True)` can never wipe everything. Deleting paths *inside* the workdir stays free.
+- **The Telegram bot is default-deny.** An empty `TELEGRAM_AUTHORIZED_USER_IDS` rejects *everyone* (a startup error says so, and `/start` reveals your numeric ID so you can whitelist yourself). An "open when unconfigured" bot with full shell access would be a remote-code-execution hole.
+
 This is intentional and at the express request of the user. If you fork this, you may want to tune the autonomy directives in `krypton/core/prompt.py` to your own taste.
 
 ---
@@ -485,7 +500,7 @@ This is intentional and at the express request of the user. If you fork this, yo
 | Bot replies are truncated mid-code-block | Already handled by `_chunk_smart`; if it still happens, file an issue with the exact message length. |
 | "tool_call_id orphaned" provider error | Run `python main.py --stop` then start fresh. Pair-safety should prevent this; report if reproducible. |
 | `ollama serve` won't start on Windows | Make sure no other process is on port 11434. The auto-boot waits 60 s; if your machine is slow, bump `ready_timeout` in `runtime/ollama_boot.py`. |
-| Telegram bot silently ignores you | Your user ID isn't in `TELEGRAM_AUTHORIZED_USER_IDS`. Check with `@userinfobot`. |
+| Telegram bot silently ignores you | Your user ID isn't in `TELEGRAM_AUTHORIZED_USER_IDS` — **or the list is empty, which now denies everyone** (secure default). Send `/start`: the bot replies with your numeric ID so you can add it, then restart. |
 | `pip install -e .` fails on pydantic | Wipe and reinstall: `rm -rf .venv && python -m venv .venv && pip install -e .` |
 | Agent says "ok procedo" but doesn't act | Re-read your `.env` — make sure you're on a model that supports function calling. `qwen2.5-coder:7b` and above do; older / smaller models often don't. |
 

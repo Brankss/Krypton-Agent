@@ -46,44 +46,11 @@ class RememberPatternTool(BaseTool):
         self._store = store
 
     async def run(self, kind: str, title: str, body: str, tags: list[str] | None = None) -> ToolResult:
-        title = title.strip()
-        body = body.strip()
-        tags_list = sorted({t.strip().lower() for t in (tags or []) if t.strip()})
-
-        # Auto-dedup: look for a near-duplicate (same kind + jaccard > 0.55 on title tokens).
-        existing = await self._store.search_patterns(title + " " + body, limit=5)
-        title_tokens = _tokset(title)
-        for ex in existing:
-            if ex.kind != kind:
-                continue
-            sim = _jaccard(title_tokens, _tokset(ex.title))
-            if sim >= 0.55:
-                merged_tags = sorted(set(ex.tags) | set(tags_list))
-                # Append the new body if it's actually new content; cap total at ~2000 chars.
-                if body not in ex.body:
-                    new_body = (ex.body.rstrip() + "\n---\n" + body)[:2000]
-                else:
-                    new_body = ex.body
-                await self._store.update_pattern(ex.id, body=new_body, tags=merged_tags)
-                return ToolResult.success(
-                    f"merged into pattern #{ex.id} (similarity={sim:.2f}): {ex.title}"
-                )
-
-        p = await self._store.add_pattern(kind, title, body, tags_list)  # type: ignore[arg-type]
-        return ToolResult.success(f"stored pattern #{p.id}: {p.title}")
-
-
-def _tokset(s: str) -> set[str]:
-    import re
-    return {t for t in re.findall(r"[a-z0-9_]+", s.lower()) if len(t) >= 3}
-
-
-def _jaccard(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    inter = len(a & b)
-    union = len(a | b)
-    return inter / union if union else 0.0
+        # Atomic dedup-or-insert lives in the store: the search + merge/insert
+        # runs under one lock so parallel tool dispatch can't double-insert.
+        pattern, merged = await self._store.remember(kind, title, body, tags or [])  # type: ignore[arg-type]
+        verb = "merged into" if merged else "stored"
+        return ToolResult.success(f"{verb} pattern #{pattern.id}: {pattern.title}")
 
 
 class RecallPatternsTool(BaseTool):

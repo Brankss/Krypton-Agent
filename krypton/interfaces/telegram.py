@@ -142,7 +142,12 @@ class SendFileToUserTool(BaseTool):
 def _authorized(update: Update) -> bool:
     allowed = settings.authorized_telegram_ids
     if not allowed:
-        return True  # no allowlist configured = open (warned at startup)
+        # SECURITY: an empty allowlist means DENY everyone. This bot grants the
+        # agent full shell / Python / filesystem access with no confirmation, so
+        # an "open when unconfigured" default is a remote-code-execution hole.
+        # The owner must set TELEGRAM_AUTHORIZED_USER_IDS (logged loudly at start;
+        # /start surfaces the caller's own ID so the owner can whitelist it).
+        return False
     uid = update.effective_user.id if update.effective_user else None
     return uid in allowed
 
@@ -160,13 +165,23 @@ _HELP = (
     "  /reset    clear conversation memory (RAM + DB)\n"
     "  /stop     interrupt the current turn\n"
     "  /reboot   restart the bot process\n"
-    "  /provider <ollama_local|ollama_cloud|openrouter>\n"
+    "  /reasoning <none|low|medium|high>  chain-of-thought effort\n"
+    "  /provider <ollama_local|ollama_cloud|openrouter|nvidia>\n"
     "  /model <name>"
 )
 
 
 async def _cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
+        # If the allowlist is empty the bot denies everyone — but help the owner
+        # bootstrap by revealing their own ID (not sensitive; @userinfobot does
+        # the same). A *configured* allowlist stays silent for unknown users.
+        if not settings.authorized_telegram_ids and update.effective_user and update.message:
+            await update.message.reply_text(
+                "Krypton is locked: no authorized users are configured.\n"
+                f"Your Telegram user ID is: {update.effective_user.id}\n"
+                "Add it to TELEGRAM_AUTHORIZED_USER_IDS in .env and restart."
+            )
         return
     await update.message.reply_text(_HELP)
 
@@ -267,7 +282,7 @@ async def _cmd_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"provider:  {sess.agent.provider.name}\n"
         f"model:     {sess.agent.provider.model}\n"
         f"context:   ~{sess.agent.context.token_count} tokens, "
-        f"{len(sess.agent.context._entries)} entries\n"  # type: ignore[attr-defined]
+        f"{sess.agent.context.entry_count} entries\n"
         f"in-flight: {in_flight}"
     )
 
@@ -715,9 +730,10 @@ def run_telegram() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     app = build_application()
     if not settings.authorized_telegram_ids:
-        log.warning(
-            "⚠️  TELEGRAM_AUTHORIZED_USER_IDS is empty — the bot will accept commands from ANY user. "
-            "Set the variable in .env to restrict access."
+        log.error(
+            "TELEGRAM_AUTHORIZED_USER_IDS is empty — the bot will REJECT every user "
+            "(secure default). Send /start to the bot to see your numeric ID, add it to "
+            "TELEGRAM_AUTHORIZED_USER_IDS in .env, and restart."
         )
     else:
         log.info("Krypton bot polling — authorized IDs: %s", settings.authorized_telegram_ids)

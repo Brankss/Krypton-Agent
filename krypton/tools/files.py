@@ -31,6 +31,32 @@ def _resolve(path: str) -> Path:
     return p
 
 
+def _is_protected(target: Path) -> bool:
+    """True if deleting `target` would wipe a root we must never auto-delete:
+    the workdir, the data dir, the user's home, a filesystem anchor, or any
+    *ancestor* of those. Deleting paths *inside* the workdir stays allowed.
+
+    This is a code-level guard, not a confirmation prompt — autonomy is
+    intentional, but `delete_path('.', recursive=True)` resolving to the
+    workdir root must never silently nuke everything.
+    """
+    try:
+        t = target.resolve()
+    except OSError:
+        t = target
+    if t == Path(t.anchor):  # filesystem root: "/", "C:\\", ...
+        return True
+    for base in (settings.workdir, settings.data_dir, Path.home()):
+        try:
+            rb = base.resolve()
+        except OSError:
+            rb = base
+        # target IS a protected base, or is an ancestor of one.
+        if t == rb or rb.is_relative_to(t):
+            return True
+    return False
+
+
 class ReadFileTool(BaseTool):
     name = "read_file"
     description = (
@@ -219,12 +245,20 @@ class DeletePathTool(BaseTool):
         target = _resolve(path)
         if not target.exists():
             return ToolResult.failure(f"path not found: {target}")
+        if _is_protected(target):
+            return ToolResult.failure(
+                f"refusing to delete protected path: {target}. This is the workdir, "
+                "data dir, home, or a filesystem root (or an ancestor of one). "
+                "Delete a specific child path instead."
+            )
+        if target.is_dir() and not recursive:
+            return ToolResult.failure(
+                f"{target} is a directory; pass recursive=true to delete it and its contents."
+            )
         import asyncio
 
         def _do() -> int:
             if target.is_dir():
-                if not recursive:
-                    raise RuntimeError("directory delete requires recursive=true")
                 count = sum(1 for _ in target.rglob("*"))
                 shutil.rmtree(target)
                 return count + 1

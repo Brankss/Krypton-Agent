@@ -30,7 +30,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cli = sub.add_parser("cli", help="interactive terminal session")
     cli.add_argument(
         "--provider",
-        choices=["ollama_local", "ollama_cloud", "openrouter"],
+        choices=["ollama_local", "ollama_cloud", "openrouter", "nvidia"],
         help="override KRYPTON_PROVIDER for this session",
     )
 

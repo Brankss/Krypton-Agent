@@ -221,7 +221,7 @@ def _html_to_text(html: str) -> str:
     # collapse runs of blank lines
     out: list[str] = []
     blank = False
-    for ln in (l.strip() for l in text.splitlines()):
+    for ln in (raw.strip() for raw in text.splitlines()):
         if not ln:
             if not blank:
                 out.append("")

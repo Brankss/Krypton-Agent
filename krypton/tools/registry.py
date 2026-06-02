@@ -44,6 +44,12 @@ class ToolRegistry:
         for t in tools:
             self.register(t)
 
+    def clear(self) -> None:
+        """Drop all tools, stats and the cached schema."""
+        self._tools.clear()
+        self._stats.clear()
+        self._schema_cache = None
+
     # ----- introspection ------------------------------------------------
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)

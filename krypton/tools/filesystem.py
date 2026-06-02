@@ -158,7 +158,6 @@ class FindFilesTool(BaseTool):
         def _walk() -> list[tuple[str, float]]:
             found: list[tuple[str, float]] = []
             root_str = str(root)
-            root_len = len(root_str.rstrip(os.sep)) + 1
             stack: list[tuple[str, int]] = [(root_str, 0)]
             while stack and len(found) < limit * 4:
                 current, depth = stack.pop()

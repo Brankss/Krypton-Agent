@@ -5,9 +5,7 @@ context reset, pattern listing.
 """
 from __future__ import annotations
 
-import asyncio
 import sys
-from typing import Awaitable
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -28,7 +26,7 @@ def _print_banner(agent: Agent) -> None:
     body.append("Krypton Agent ", style="bold cyan")
     body.append(f"  provider={agent.provider.name}  model={agent.provider.model}\n", style="dim")
     body.append(f"workdir: {settings.workdir}\n", style="dim")
-    body.append("Commands: /provider <name>  /model <name>  /reset  /patterns  /quit\n", style="dim")
+    body.append("Commands: /provider <name>  /model <name>  /status  /reset  /patterns  /quit\n", style="dim")
     console.print(Panel(body, border_style="cyan"))
 
 
@@ -141,12 +139,29 @@ async def _handle_command(line: str, agent: Agent) -> bool | None:
             console.print(f"  #{p.id} [{p.kind}] {p.title}  [dim]uses={p.uses}[/]")
         return True
 
+    if cmd == "/status":
+        ctx = agent.context
+        console.print(
+            f"provider: {agent.provider.name}\n"
+            f"model:    {agent.provider.model}\n"
+            f"context:  ~{ctx.token_count} tokens, {ctx.entry_count} entries"
+        )
+        called = [(n, s) for n, s in agent.registry.stats().items() if s.calls]
+        if called:
+            console.print("tool calls:")
+            for name, s in sorted(called, key=lambda kv: kv[1].calls, reverse=True):
+                console.print(f"  {name}: {s.calls} call(s), {s.errors} err, avg {s.avg_ms:.0f}ms")
+        else:
+            console.print("[dim]no tool calls yet[/]")
+        return True
+
     if cmd == "/help":
         console.print(
             Markdown(
                 "**Commands**\n\n"
-                "- `/provider <ollama_local|ollama_cloud|openrouter>`\n"
+                "- `/provider <ollama_local|ollama_cloud|openrouter|nvidia>`\n"
                 "- `/model <name>`\n"
+                "- `/status` provider, model, context size + tool stats\n"
                 "- `/reset` clear conversation\n"
                 "- `/patterns` list learned patterns\n"
                 "- `/quit` exit"

@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from krypton.core.tokens import count_tokens
-from krypton.providers.base import Message
+from krypton.providers.base import Message, ToolCall
 
 
 @dataclass(slots=True)
@@ -74,13 +74,21 @@ class ConversationContext:
         total = count_tokens(self._system.content) if self._system else 0
         return total + sum(e.tokens for e in self._entries)
 
+    @property
+    def entry_count(self) -> int:
+        """Number of non-system entries (public accessor for /status etc.)."""
+        return len(self._entries)
+
     # ------------------------------------------------------------------
     def compact(self) -> int:
-        """Reduce context size in three stages.
+        """Reduce context size in stages.
 
         1) Deduplicate exact-repeat tool results / assistant turns.
         2) If still over budget: head/tail-truncate large old tool outputs.
         3) If still over budget: drop assistant scratch turns from the middle.
+        4) Always: repair call/result pairing so truncation never leaves an
+           orphaned tool message (or a dangling assistant tool_call) — that
+           is exactly what makes OpenAI-format providers reject the history.
 
         Returns total tokens freed across all stages.
         """
@@ -110,6 +118,10 @@ class ConversationContext:
                 if e.pinned or e.msg.role == "user":
                     keep.append(e)
             self._entries = keep + tail
+
+        # Final safety net: stages 2-3 can drop an assistant turn while keeping
+        # its tool result (or vice versa). Repair the pairing unconditionally.
+        freed += self._repair_pairs()
         return freed
 
     # ------------------------------------------------------------------
@@ -163,24 +175,44 @@ class ConversationContext:
         freed = sum(self._entries[i].tokens for i in to_drop)
         self._entries = [e for i, e in enumerate(self._entries) if i not in to_drop]
 
-        # --- pair safety pass 1: drop orphan tool messages ----------------
+        # Dropping duplicates can sever a call/result pair; repair it.
+        freed += self._repair_pairs()
+        return freed
+
+    # ------------------------------------------------------------------
+    def _repair_pairs(self) -> int:
+        """Keep assistant tool_calls and tool responses paired.
+
+        Two passes, idempotent and safe to run after any structural mutation
+        (dedup, head/tail truncation, scratch drop):
+
+          1. Drop any tool message whose `tool_call_id` no longer points at a
+             preceding assistant tool_call.
+          2. Strip any assistant tool_call that has no following tool response.
+
+        Returns tokens freed. This is the invariant OpenAI-format providers
+        (OpenRouter / NVIDIA) enforce: an unpaired tool message or a dangling
+        assistant tool_call is a hard 400.
+        """
+        freed = 0
+
+        # --- pass 1: drop orphan tool messages ----------------------------
         valid_call_ids: set[str] = set()
         for e in self._entries:
             if e.msg.role == "assistant":
                 for tc in e.msg.tool_calls:
                     valid_call_ids.add(tc.id)
-        orphans = [
+        orphans = {
             i for i, e in enumerate(self._entries)
             if e.msg.role == "tool"
             and e.msg.tool_call_id
             and e.msg.tool_call_id not in valid_call_ids
-        ]
+        }
         if orphans:
             freed += sum(self._entries[i].tokens for i in orphans)
-            orphan_set = set(orphans)
-            self._entries = [e for i, e in enumerate(self._entries) if i not in orphan_set]
+            self._entries = [e for i, e in enumerate(self._entries) if i not in orphans]
 
-        # --- pair safety pass 2: strip assistant tool_calls without responses
+        # --- pass 2: strip assistant tool_calls without responses ---------
         answered: set[str] = set()
         for e in self._entries:
             if e.msg.role == "tool" and e.msg.tool_call_id:
@@ -192,9 +224,23 @@ class ConversationContext:
                     before = e.tokens
                     e.msg.tool_calls = kept
                     e.tokens = _estimate(e.msg)
+                    e.invalidate()
                     freed += before - e.tokens
 
         return freed
+
+    # ------------------------------------------------------------------
+    def drop_trailing_unanswered_tool_calls(self) -> None:
+        """Strip tool_calls from the final assistant message if they were never
+        answered (e.g. the iteration cap was hit mid-dispatch), so the next
+        turn doesn't start from a structurally broken history."""
+        if not self._entries:
+            return
+        last = self._entries[-1]
+        if last.msg.role == "assistant" and last.msg.tool_calls:
+            last.msg.tool_calls = []
+            last.tokens = _estimate(last.msg)
+            last.invalidate()
 
     # ------------------------------------------------------------------
     def reset(self) -> None:
@@ -206,7 +252,6 @@ class ConversationContext:
     # from the live environment + memory.
     # ------------------------------------------------------------------
     def serialize(self) -> str:
-        import json
         out = []
         for e in self._entries:
             m = e.msg
@@ -227,9 +272,6 @@ class ConversationContext:
         return json.dumps(out, ensure_ascii=False)
 
     def restore(self, payload: str) -> int:
-        import json
-        from krypton.providers.base import Message, ToolCall
-
         data = json.loads(payload) if payload else []
         self._entries.clear()
         for d in data:
