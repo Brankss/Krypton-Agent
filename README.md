@@ -17,9 +17,11 @@ Multi-provider LLM • Surgical tool system • Persistent pattern learning • 
 
 ## What is Krypton?
 
-Krypton is a **local-first autonomous agent** designed to run on your own hardware and operate on your real system — files, shell, network, Python — with zero confirmation prompts and persistent memory across reboots. You talk to it via a terminal REPL or a private Telegram bot from your phone, and it does the work.
+Krypton is an **always-on autonomous agent** that lives on a private cloud VM (or your own hardware) and operates on its real system — files, shell, network, Python — with zero confirmation prompts and persistent memory across restarts. You talk to it from anywhere via a private Telegram bot (or a local terminal REPL), and it does the work — including **recurring and scheduled tasks** that run by themselves while you're away.
 
-It's not a chatbot, not a playground demo, not a wrapper around someone else's framework. It's a single ~5k-line Python codebase you can read top-to-bottom in an afternoon, designed to be the **personal assistant that lives on your laptop and gets shit done.**
+It knows exactly what it is: a remote agent on its own server. It will not pretend it can reach your PC's files — if it needs one, it asks you to send it on Telegram.
+
+It's not a chatbot, not a playground demo, not a wrapper around someone else's framework. It's a single ~5k-line Python codebase you can read top-to-bottom in an afternoon, designed to be the **personal assistant that runs 24/7 in the cloud and gets shit done** — professional (plans, reports, trend analysis, ad campaigns) and personal alike.
 
 ---
 
@@ -34,7 +36,9 @@ Krypton is none of those. Concretely:
 
 | | Typical agent | **Krypton** |
 |---|---|---|
-| **Where it runs** | OpenAI / hosted API | Your laptop, Ollama-first, no cloud required |
+| **Where it runs** | OpenAI / hosted API | Always-on cloud VM (or your laptop), Telegram-first |
+| **Self-awareness** | Hallucinates capabilities | Knows it's remote — won't fake access to your PC |
+| **Proactivity** | Reactive only | **Recurring/scheduled tasks** run on their own |
 | **Permission model** | Asks before every action | Permanent grant — executes immediately |
 | **Tool dispatch** | Sequential | **Parallel** via `asyncio.gather` |
 | **Context management** | Truncate when full → forgets everything | **3-stage compaction**: dedup → head/tail → drop scratch |
@@ -52,7 +56,9 @@ The design priority is **surgical precision over generality**. Each tool has the
 ## Feature highlights
 
 - **Four LLM backends, one interface** — Ollama local, Ollama Cloud, OpenRouter, NVIDIA NIM (free dev tier with Kimi K2.6, Qwen3, Nemotron, gpt-oss, DeepSeek V4 and more). Switch live with `/provider`.
-- **19 surgical tools** — filesystem, indexed instant-find, file CRUD, web search (Tavily + DDG), shell, Python exec, memory.
+- **Cloud-native self-model** — the agent knows it runs on a remote Linux VM, what it can do, and what it can't (it won't hallucinate access to your local PC; it asks you to send files on Telegram instead).
+- **Recurring & scheduled tasks** — `schedule_task` registers one-off or recurring jobs (`every N min`, `daily at HH:MM`, `once in N min`) that fire on their own and message you the result. Perfect for daily reports, trend digests, reminders.
+- **19 surgical tools** — filesystem, indexed instant-find, file CRUD, web search (Tavily + DDG), shell, Python exec, memory — plus Telegram-only file delivery & scheduling.
 - **Parallel tool dispatch** — independent calls fire concurrently, not one at a time.
 - **Smart context compaction** — identical tool outputs deduped to one entry with a `[repeated N×]` marker; head/tail truncation only as last resort.
 - **Persistent memory** — patterns and facts survive restarts; conversations restored per Telegram chat.
@@ -362,19 +368,23 @@ The bot accepts **text, photos, voice notes, documents** — files are saved und
 | 11 | `web_search` | Tavily or DuckDuckGo | 5-min cache, snippet cap 240 chars |
 | 12 | `fetch_url` | Fetch + HTML→text | Shared `httpx` pool |
 | 13 | `execute_python` | Run Python subprocess | `-I` isolated mode, configurable timeout |
-| 14 | `shell` | `cmd.exe` / `sh -c` | |
+| 14 | `shell` | `/bin/sh -c` (Linux VM) | the agent's Unix toolbox |
 | 15 | `remember_pattern` | Store a learned recipe / error / optimization | **Atomic** Jaccard auto-dedup ≥ 0.55 (safe under parallel dispatch) |
 | 16 | `recall_patterns` | Keyword search over patterns | |
 | 17 | `forget_pattern` | Delete stale patterns | |
 | 18 | `note_fact` | Set a durable key/value fact | Auto-injected into every prompt |
 | 19 | `get_fact` | Read a fact (or list all) | |
 
-Two more register **conditionally**, for up to 21 total:
+Four more register **when running the Telegram bot** (bound to your chat), for 23 total:
 
-| Tool | Purpose | When |
-|---|---|---|
-| `powershell` | PowerShell `-NoProfile -NonInteractive` | Windows only |
-| `send_file_to_user` | Send a file back via Telegram | Only when running the bot |
+| Tool | Purpose |
+|---|---|
+| `send_file_to_user` | Send a file from the VM back to your chat |
+| `schedule_task` | Register a one-off / recurring task (`every N min`, `daily at HH:MM`, `once in N min`) |
+| `list_schedules` | List your active scheduled tasks |
+| `cancel_schedule` | Cancel a scheduled task by id |
+
+> The Windows-only `powershell` tool was removed — Krypton now targets a Linux VM and uses `shell` (`/bin/sh`) + `execute_python`.
 
 ---
 
@@ -526,12 +536,12 @@ deploy keys, instant-deploy upgrade): [`deploy/README.md`](deploy/README.md).
 
 ## Roadmap / ideas
 
+- [x] Background scheduled / recurring tasks (`schedule_task`)
+- [x] Self-update via `git pull` + restart (`deploy/sync.sh` + systemd timer)
 - [ ] Voice transcription for incoming Telegram voice notes (whisper.cpp)
 - [ ] OCR for incoming photos (tesseract)
-- [ ] Background scheduled tasks (cron-style)
 - [ ] Browser automation tool (Playwright)
 - [ ] Multi-user mode with per-user memory partitions
-- [ ] Self-update via `git pull` + restart
 
 PRs welcome.
 

@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=Path.cwd() / "data", alias="KRYPTON_DATA_DIR")
     max_iterations: int = Field(default=40, alias="KRYPTON_MAX_ITERATIONS")
     context_budget: int = Field(default=24000, alias="KRYPTON_CONTEXT_BUDGET")
+    # IANA tz (e.g. Europe/Rome) for daily-scheduled tasks; UTC if unset/invalid.
+    timezone: str = Field(default="UTC", alias="KRYPTON_TIMEZONE")
 
     @field_validator("workdir", "data_dir", mode="before")
     @classmethod

@@ -1,16 +1,13 @@
-"""High-power execution tools.
+"""High-power execution tools (Linux cloud VM).
 
   execute_python — runs arbitrary Python in a subprocess of the current
-                   interpreter; stdout/stderr captured, full system access.
+                   interpreter; stdout/stderr captured, full access to THIS VM.
 
-  powershell     — runs an arbitrary PowerShell command via the Windows
-                   shell with -NoProfile -NonInteractive.
+  shell          — runs a shell command via /bin/sh -c (cmd.exe on Windows,
+                   kept for dev parity). The agent's everyday Unix toolbox.
 
-  bash           — runs a shell command via cmd.exe /c on Windows or
-                   /bin/sh -c elsewhere. Convenience for cross-platform tools.
-
-Per requirement: the agent is not sandboxed. We do *not* gate these
-behind interactive confirmation — the user explicitly asked for full
+Per requirement: the agent is not sandboxed on its own VM. We do *not* gate
+these behind interactive confirmation — the user explicitly asked for full
 autonomy. We still cap output size so a runaway never destroys context.
 """
 from __future__ import annotations
@@ -129,56 +126,16 @@ class ExecutePythonTool(BaseTool):
 
 
 # ===========================================================================
-# powershell
-# ===========================================================================
-
-
-class PowerShellTool(BaseTool):
-    name = "powershell"
-    description = (
-        "Run a PowerShell command on Windows (-NoProfile -NonInteractive). "
-        "Use for filesystem ops, system info, package mgmt, automation. "
-        "Never use interactive cmdlets (Read-Host, Get-Credential)."
-    )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "command": {"type": "string"},
-            "timeout": {"type": "number", "default": 120.0},
-            "cwd": {"type": "string"},
-        },
-        "required": ["command"],
-    }
-    timeout_s = 600.0
-
-    async def run(self, command: str, timeout: float = 120.0, cwd: str | None = None) -> ToolResult:
-        exe = _resolve_powershell()
-        if exe is None:
-            return ToolResult.failure("powershell.exe / pwsh not found in PATH")
-        rc, out, err = await _run_subprocess(
-            [exe, "-NoProfile", "-NonInteractive", "-Command", command],
-            cwd=cwd,
-            timeout=timeout,
-        )
-        return ToolResult(ok=rc == 0, content=_format(rc, out, err, label="powershell"))
-
-
-def _resolve_powershell() -> str | None:
-    # Prefer pwsh 7+, fall back to Windows PowerShell 5.1.
-    from shutil import which
-    return which("pwsh") or which("powershell")
-
-
-# ===========================================================================
-# bash / cross-platform shell convenience
+# shell  —  the agent's Unix command line on its own VM
 # ===========================================================================
 
 
 class ShellTool(BaseTool):
     name = "shell"
     description = (
-        "Run a shell command (cmd.exe on Windows, /bin/sh elsewhere). "
-        "Use for simple one-liners. For PowerShell-specific commands use the `powershell` tool."
+        "Run a shell command on this Linux VM via /bin/sh -c (cmd.exe on Windows). "
+        "Your everyday Unix toolbox: ls, cat, curl, grep, package installs (apt/dnf), "
+        "git, etc. Use for one-liners; reach for execute_python for real logic."
     )
     parameters = {
         "type": "object",
@@ -201,7 +158,4 @@ class ShellTool(BaseTool):
 
 
 def tools() -> list[Any]:
-    out: list[Any] = [ExecutePythonTool(), ShellTool()]
-    if sys.platform == "win32":
-        out.append(PowerShellTool())
-    return out
+    return [ExecutePythonTool(), ShellTool()]

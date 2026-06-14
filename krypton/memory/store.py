@@ -37,6 +37,21 @@ class Pattern:
         return f"[{self.kind}{tagstr}] {self.title}\n  {self.body}"
 
 
+@dataclass(slots=True)
+class Schedule:
+    id: int
+    chat_id: int
+    title: str
+    prompt: str
+    kind: str                      # once | interval | daily
+    next_run: float
+    interval_seconds: int | None = None
+    at_time: str | None = None
+    enabled: bool = True
+    last_run: float | None = None
+    created_at: float = 0.0
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS patterns (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,10 +77,25 @@ CREATE TABLE IF NOT EXISTS conversations (
     payload     TEXT NOT NULL,
     updated_at  REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id          INTEGER NOT NULL,
+    title            TEXT NOT NULL,
+    prompt           TEXT NOT NULL,
+    kind             TEXT NOT NULL,          -- once | interval | daily
+    interval_seconds INTEGER,
+    at_time          TEXT,                   -- 'HH:MM' for daily
+    next_run         REAL NOT NULL,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    last_run         REAL,
+    created_at       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sched_due ON schedules(enabled, next_run);
 """
 
 
-SCHEMA_VERSION = 2  # bump when _SCHEMA changes and add a migration step in _migrate
+SCHEMA_VERSION = 3  # bump when _SCHEMA changes and add a migration step in _migrate
 
 
 class MemoryStore:
@@ -319,6 +349,84 @@ class MemoryStore:
             )
             return cur.rowcount > 0
 
+    # ----- schedules (recurring / deferred tasks) ----------------------
+    async def add_schedule(
+        self,
+        *,
+        chat_id: int,
+        title: str,
+        prompt: str,
+        kind: str,
+        next_run: float,
+        interval_seconds: int | None = None,
+        at_time: str | None = None,
+    ) -> Schedule:
+        now = time.time()
+        async with self._lock:
+            cur = await asyncio.to_thread(
+                self._conn.execute,
+                "INSERT INTO schedules"
+                "(chat_id,title,prompt,kind,interval_seconds,at_time,next_run,enabled,created_at) "
+                "VALUES(?,?,?,?,?,?,?,1,?)",
+                (chat_id, title, prompt, kind, interval_seconds, at_time, next_run, now),
+            )
+            sid = cur.lastrowid or 0
+        return Schedule(
+            id=sid, chat_id=chat_id, title=title, prompt=prompt, kind=kind,
+            next_run=next_run, interval_seconds=interval_seconds, at_time=at_time,
+            enabled=True, created_at=now,
+        )
+
+    async def list_schedules(self, chat_id: int | None = None,
+                             include_disabled: bool = False) -> list[Schedule]:
+        q = "SELECT * FROM schedules"
+        clauses, params = [], []
+        if chat_id is not None:
+            clauses.append("chat_id=?")
+            params.append(chat_id)
+        if not include_disabled:
+            clauses.append("enabled=1")
+        if clauses:
+            q += " WHERE " + " AND ".join(clauses)
+        q += " ORDER BY next_run ASC"
+        rows = await asyncio.to_thread(lambda: self._conn.execute(q, tuple(params)).fetchall())
+        return [_row_to_schedule(r) for r in rows]
+
+    async def due_schedules(self, now: float) -> list[Schedule]:
+        rows = await asyncio.to_thread(
+            lambda: self._conn.execute(
+                "SELECT * FROM schedules WHERE enabled=1 AND next_run<=? ORDER BY next_run ASC",
+                (now,),
+            ).fetchall()
+        )
+        return [_row_to_schedule(r) for r in rows]
+
+    async def update_after_run(self, sid: int, *, next_run: float, last_run: float) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._conn.execute,
+                "UPDATE schedules SET next_run=?, last_run=? WHERE id=?",
+                (next_run, last_run, sid),
+            )
+
+    async def set_schedule_enabled(self, sid: int, enabled: bool, *,
+                                   last_run: float | None = None) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._conn.execute,
+                "UPDATE schedules SET enabled=?, last_run=COALESCE(?, last_run) WHERE id=?",
+                (1 if enabled else 0, last_run, sid),
+            )
+
+    async def delete_schedule(self, sid: int, chat_id: int | None = None) -> bool:
+        q, params = "DELETE FROM schedules WHERE id=?", [sid]
+        if chat_id is not None:
+            q += " AND chat_id=?"
+            params.append(chat_id)
+        async with self._lock:
+            cur = await asyncio.to_thread(self._conn.execute, q, tuple(params))
+            return cur.rowcount > 0
+
     async def aclose(self) -> None:
         await asyncio.to_thread(self._conn.close)
 
@@ -337,6 +445,22 @@ def _row_to_pattern(row: sqlite3.Row) -> Pattern:
         uses=row["uses"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _row_to_schedule(row: sqlite3.Row) -> Schedule:
+    return Schedule(
+        id=row["id"],
+        chat_id=row["chat_id"],
+        title=row["title"],
+        prompt=row["prompt"],
+        kind=row["kind"],
+        next_run=row["next_run"],
+        interval_seconds=row["interval_seconds"],
+        at_time=row["at_time"],
+        enabled=bool(row["enabled"]),
+        last_run=row["last_run"],
+        created_at=row["created_at"],
     )
 
 

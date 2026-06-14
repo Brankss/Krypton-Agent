@@ -24,6 +24,7 @@ import asyncio
 import datetime as dt
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ from telegram.ext import (
 from krypton.bootstrap import build_agent
 from krypton.config import settings
 from krypton.core.agent import Agent
+from krypton.core.scheduling import compute_next_run
 from krypton.tools.base import BaseTool, ToolArtifact, ToolResult
 
 log = logging.getLogger("krypton.telegram")
@@ -72,6 +74,10 @@ def _get_session(chat_id: int) -> _Session:
         outbox: asyncio.Queue[Path] = asyncio.Queue()
         send_tool = SendFileToUserTool(outbox)
         agent = build_agent(interface="telegram", extra_tools=[send_tool])
+        # Scheduler tools are bound to this chat (like send_file_to_user) and to
+        # the agent's own memory store, so a scheduled task reports back here.
+        from krypton.tools.scheduler import tools as scheduler_tools
+        agent.registry.register_many(scheduler_tools(agent.memory, chat_id))
         sess = _Session(agent=agent, outbox=outbox)
         _SESSIONS[chat_id] = sess
     return sess
@@ -583,6 +589,23 @@ async def _send_long(msg, body: str) -> None:
             await msg.reply_text(chunk, disable_web_page_preview=True)
 
 
+async def _deliver_to_chat(bot, chat_id: int, body: str) -> None:
+    """Proactively send a (possibly long) message to a chat — used by the
+    scheduler, where there's no incoming message to reply to."""
+    for chunk in _chunk_smart(body, _SAFE_MAX):
+        sent = False
+        md = _to_markdown_v2(chunk)
+        if md is not None:
+            try:
+                await bot.send_message(chat_id, md, parse_mode=ParseMode.MARKDOWN_V2,
+                                       disable_web_page_preview=True)
+                sent = True
+            except Exception as e:  # noqa: BLE001
+                log.debug("scheduled markdown send failed (%s); plain fallback", e)
+        if not sent:
+            await bot.send_message(chat_id, chunk, disable_web_page_preview=True)
+
+
 def _chunk_smart(s: str, n: int) -> list[str]:
     """Split `s` into chunks of <= n chars.
 
@@ -701,6 +724,99 @@ def _short(v: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Scheduler — fires recurring / deferred tasks created via schedule_task
+# ---------------------------------------------------------------------------
+
+
+_SCHED_TICK = 30  # seconds between due-checks
+
+
+def _chat_authorized(chat_id: int) -> bool:
+    """Only fire scheduled tasks for whitelisted chats (and never when the
+    allowlist is empty — consistent with the bot's default-deny posture)."""
+    allowed = settings.authorized_telegram_ids
+    return bool(allowed) and chat_id in allowed
+
+
+async def _run_scheduled(bot, store, sched) -> None:
+    """Execute one due schedule in its chat's session and deliver the result."""
+    sess = _get_session(sched.chat_id)
+    await _ensure_restored(sess, sched.chat_id)
+    if sess.lock.locked():
+        return  # chat is busy with a live turn; next_run stays due -> retried
+
+    async with sess.lock:
+        try:
+            result = await sess.agent.turn(f"[scheduled task '{sched.title}']\n{sched.prompt}")
+            body = f"⏰ {sched.title}\n\n" + (result.final_text or "(done)")
+            if result.aborted and result.error:
+                body += f"\n\n⚠️ {result.error}"
+            await _deliver_to_chat(bot, sched.chat_id, body)
+            while not sess.outbox.empty():
+                p = await sess.outbox.get()
+                try:
+                    with open(p, "rb") as f:
+                        await bot.send_document(sched.chat_id, document=f, filename=p.name)
+                except Exception as e:  # noqa: BLE001
+                    await _deliver_to_chat(bot, sched.chat_id, f"(failed to send {p.name}: {e})")
+            try:
+                await sess.agent.memory.save_conversation(
+                    sched.chat_id, sess.agent.context.serialize()
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("schedule %d: persist failed: %s", sched.id, e)
+        except Exception as e:  # noqa: BLE001
+            log.warning("schedule %d failed: %s", sched.id, e)
+            try:
+                await _deliver_to_chat(bot, sched.chat_id, f"⏰ {sched.title}: errore — {e}")
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            now = time.time()
+            if sched.kind == "once":
+                await store.set_schedule_enabled(sched.id, False, last_run=now)
+            else:
+                try:
+                    nxt = compute_next_run(
+                        sched.kind, now,
+                        interval_seconds=sched.interval_seconds,
+                        at_time=sched.at_time, tz=settings.timezone,
+                    ) or (now + 3600)
+                except Exception:  # noqa: BLE001
+                    nxt = now + 3600
+                await store.update_after_run(sched.id, next_run=nxt, last_run=now)
+
+
+async def _scheduler_loop(app: Application) -> None:
+    from krypton.memory.store import MemoryStore
+
+    store = MemoryStore(settings.data_dir / "krypton.db")
+    log.info("scheduler loop started (tick %ds)", _SCHED_TICK)
+    try:
+        while True:
+            await asyncio.sleep(_SCHED_TICK)
+            try:
+                due = await store.due_schedules(time.time())
+            except Exception as e:  # noqa: BLE001
+                log.warning("scheduler: due-query failed: %s", e)
+                continue
+            for sched in due:
+                if not _chat_authorized(sched.chat_id):
+                    continue
+                try:
+                    await _run_scheduled(app.bot, store, sched)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("scheduler: run of #%s failed: %s", getattr(sched, "id", "?"), e)
+    except asyncio.CancelledError:
+        await store.aclose()
+        raise
+
+
+async def _post_init(app: Application) -> None:
+    app.bot_data["_sched_task"] = asyncio.create_task(_scheduler_loop(app))
+
+
+# ---------------------------------------------------------------------------
 # Bootstrap
 # ---------------------------------------------------------------------------
 
@@ -708,7 +824,7 @@ def _short(v: Any) -> str:
 def build_application() -> Application:
     if not settings.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set in .env")
-    app = ApplicationBuilder().token(settings.telegram_bot_token).build()
+    app = ApplicationBuilder().token(settings.telegram_bot_token).post_init(_post_init).build()
     app.add_handler(CommandHandler("start", _cmd_start))
     app.add_handler(CommandHandler("help", _cmd_start))
     app.add_handler(CommandHandler("reset", _cmd_reset))
