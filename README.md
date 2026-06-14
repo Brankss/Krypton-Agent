@@ -506,6 +506,24 @@ This is intentional and at the express request of the user. If you fork this, yo
 
 ---
 
+## Always-on cloud deployment
+
+Run Krypton 24/7 on a free cloud VM (e.g. Oracle Cloud Always-Free / Ampere
+A1), with the code **auto-synced from GitHub**: the VM polls its branch every
+couple of minutes and redeploys + restarts itself when you push.
+
+```bash
+git clone https://github.com/<your-user>/krypton-agent.git
+cd krypton-agent && bash deploy/install.sh
+# then fill in ~/krypton-agent/.env and: sudo systemctl start krypton
+```
+
+The Telegram bot uses outbound long-polling, so **no inbound ports** are
+required. Full walkthrough (Oracle setup, auto-sync internals, private-repo
+deploy keys, instant-deploy upgrade): [`deploy/README.md`](deploy/README.md).
+
+---
+
 ## Roadmap / ideas
 
 - [ ] Voice transcription for incoming Telegram voice notes (whisper.cpp)
