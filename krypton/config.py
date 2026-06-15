@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     context_budget: int = Field(default=24000, alias="KRYPTON_CONTEXT_BUDGET")
     # IANA tz (e.g. Europe/Rome) for daily-scheduled tasks; UTC if unset/invalid.
     timezone: str = Field(default="UTC", alias="KRYPTON_TIMEZONE")
+    # Cap on tokens generated per model call — bounds worst-case latency.
+    # Raise it if you enable reasoning or need very long single answers.
+    max_response_tokens: int = Field(default=2048, alias="KRYPTON_MAX_RESPONSE_TOKENS")
 
     @field_validator("workdir", "data_dir", mode="before")
     @classmethod

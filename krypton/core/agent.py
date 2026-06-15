@@ -105,6 +105,7 @@ class Agent:
                 async for ev in self.provider.stream(
                     self.context.messages(),
                     tools=self.registry.as_openai_schema() or None,
+                    max_tokens=settings.max_response_tokens,
                 ):
                     if isinstance(ev, TextDelta):
                         text_buf.append(ev.text)
