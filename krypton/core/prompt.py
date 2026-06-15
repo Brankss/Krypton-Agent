@@ -49,7 +49,9 @@ _SELF = (
     "  - remember facts & lessons across restarts (persistent SQLite memory);\n"
     "  - send files to Riccardo on Telegram (send_file_to_user);\n"
     "  - schedule one-off or recurring tasks that run on their own and message him\n"
-    "    (schedule_task / list_schedules / cancel_schedule).\n"
+    "    (schedule_task / list_schedules / cancel_schedule);\n"
+    "  - orchestrate a team: spawn specialist worker subagents that run IN PARALLEL,\n"
+    "    each in its own isolated context with its own tools (spawn_agents).\n"
     "\n"
     "You CANNOT — never pretend you can:\n"
     "  - reach Riccardo's local computer, phone, their files, drives or screen: they\n"
@@ -102,24 +104,36 @@ _OPERATING_RULES = (
     "   later with no access to today's chat). Confirm what you scheduled and when.\n"
     "   Manage existing ones with `list_schedules` / `cancel_schedule`.\n"
     "\n"
-    "6. ONLY EXCEPTION to acting immediately: a genuinely destructive or irreversible\n"
+    "6. DELEGATE IN PARALLEL (orchestration). When a task has several INDEPENDENT\n"
+    "   parts — research multiple topics, analyze several datasets/competitors, draft\n"
+    "   multiple assets — call `spawn_agents` with one SELF-CONTAINED subtask per part.\n"
+    "   Specialist workers run simultaneously in isolated contexts and return their\n"
+    "   results; you then synthesize. Use it to go faster and keep your own context\n"
+    "   clean. Do simple or strictly-sequential work yourself; don't over-delegate.\n"
+    "\n"
+    "7. GROUND, DON'T HALLUCINATE. Base answers on real tool outputs and memory\n"
+    "   (recall_patterns / get_fact), not on guesses. Never invent files, paths, data,\n"
+    "   URLs, command output, or 'facts about Riccardo'. If you don't know or can't\n"
+    "   verify something, say so and find out (search / read / ask) — don't make it up.\n"
+    "\n"
+    "8. ONLY EXCEPTION to acting immediately: a genuinely destructive or irreversible\n"
     "   operation (mass delete, destructive shell, irreversible external API calls,\n"
     "   data-loss risk). THEN — and only then — propose a 3-bullet plan and ask once.\n"
     "   (Note: delete_path already refuses to remove the workdir / data / home /\n"
     "   filesystem root, so normal cleanup inside the workdir is safe — just do it.)\n"
     "\n"
-    "7. Tool selection: most surgical first (grep > read_file; edit_file > write_file).\n"
+    "9. Tool selection: most surgical first (grep > read_file; edit_file > write_file).\n"
     "   Call independent tools IN PARALLEL — emit multiple tool_calls in one turn\n"
     "   when their inputs don't depend on each other's outputs.\n"
     "\n"
-    "8. Style: end each turn with ONE concise sentence (what you did + what's next\n"
-    "   if anything). No preamble — no 'Ecco', 'Vediamo', 'Allora'. Italian to the\n"
-    "   user; English in code/identifiers.\n"
+    "10. Style: end each turn with ONE concise sentence (what you did + what's next\n"
+    "    if anything). No preamble — no 'Ecco', 'Vediamo', 'Allora'. Italian to the\n"
+    "    user; English in code/identifiers.\n"
     "\n"
-    "9. Context: messages tagged `[repeated N×]` mean older copies were dropped to\n"
-    "   save space. Do NOT re-run a tool because earlier copies look empty.\n"
+    "11. Context: messages tagged `[repeated N×]` mean older copies were dropped to\n"
+    "    save space. Do NOT re-run a tool because earlier copies look empty.\n"
     "\n"
-    "10. Learning: when you discover a non-obvious recipe / error / optimization, or\n"
+    "12. Learning: when you discover a non-obvious recipe / error / optimization, or\n"
     "    a durable fact about Riccardo (preferences, projects, accounts), call\n"
     "    `remember_pattern` / `note_fact` to persist it. Future runs will see it."
 )
@@ -224,6 +238,72 @@ def build_system_prompt(
         )
 
     return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Specialist worker subagents (spawned by the orchestrator, run in parallel)
+# ---------------------------------------------------------------------------
+
+_WORKER_RULES = (
+    "WORKER DIRECTIVES:\n"
+    "1. EXECUTE: call tools NOW to do the task — don't merely describe it. Use\n"
+    "   independent tools IN PARALLEL.\n"
+    "2. STAY IN SCOPE: do ONLY the assigned task. Don't ask questions — make\n"
+    "   reasonable assumptions and proceed.\n"
+    "3. GROUND, DON'T HALLUCINATE: rely on real tool outputs and memory; if you can't\n"
+    "   verify something, say so — never invent files, data, URLs, or results.\n"
+    "4. RETURN a COMPLETE, self-contained result the orchestrator can use directly\n"
+    "   (findings, conclusions, any file paths you created). End with a tight summary."
+)
+
+
+def build_subagent_prompt(
+    *,
+    role: str,
+    registry: ToolRegistry,
+    patterns: Iterable[Pattern] = (),
+    facts: dict[str, str] | None = None,
+    provider_label: str = "",
+    model_label: str = "",
+) -> str:
+    """System prompt for a spawned specialist worker: scoped role + the shared
+    environment self-model + its (reduced) toolset + worker directives + memory."""
+    identity = (
+        f"You are a specialist WORKER subagent (role: {role}) spawned by Krypton's "
+        "orchestrator to complete ONE focused task in isolation, in parallel with "
+        "other workers. You CANNOT spawn agents, message the user, send files, or "
+        "schedule — you only do the work and RETURN your result to the orchestrator."
+    )
+
+    tool_lines = [
+        f"  - {t.name}: {(t.description or '').strip().splitlines()[0] if t.description else ''}"
+        for t in sorted(registry.all(), key=lambda t: t.name)
+    ]
+    env = "\n".join([
+        f"  os        : {platform.system()} {platform.release()}",
+        f"  workdir   : {settings.workdir}",
+        f"  now       : {dt.datetime.now().isoformat(timespec='seconds')}",
+        f"  model     : {provider_label} ({model_label})",
+    ])
+
+    parts = [
+        "# Role\n" + identity,
+        _SELF,
+        ("# Tools available\n" + "\n".join(tool_lines)) if tool_lines else "",
+        "# Directives\n" + _WORKER_RULES,
+        "# Environment\n" + env,
+    ]
+
+    blocks: list[str] = []
+    if facts:
+        blocks.append("Facts on file:\n" + "\n".join(f"  - {k} = {v}" for k, v in sorted(facts.items())))
+    pat_list = list(patterns)
+    if pat_list:
+        blocks.append("Relevant learned patterns:\n" + "\n".join(f"  - {p.render()}" for p in pat_list))
+    if blocks:
+        parts.append("# Memory\n" + "\n\n".join(blocks))
+
+    return "\n\n".join(p for p in parts if p)
 
 
 def invalidate_static_cache() -> None:

@@ -20,7 +20,7 @@ from typing import Callable, Awaitable
 
 from krypton.config import settings
 from krypton.core.context import ConversationContext
-from krypton.core.prompt import build_system_prompt
+from krypton.core.prompt import build_subagent_prompt, build_system_prompt
 from krypton.memory.store import MemoryStore
 from krypton.providers.base import (
     Done,
@@ -58,26 +58,42 @@ class Agent:
         memory: MemoryStore,
         context: ConversationContext | None = None,
         interface: str = "cli",
+        subagent_role: str | None = None,
+        max_iterations: int | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
         self.memory = memory
         self.context = context or ConversationContext(target_budget=settings.context_budget)
         self.interface = interface
+        # When set, this Agent is a specialist worker spawned by the orchestrator:
+        # it gets a scoped prompt, a shorter iteration budget, and no chat powers.
+        self.subagent_role = subagent_role
+        self.max_iterations = max_iterations or settings.max_iterations
 
     # ------------------------------------------------------------------
     async def _refresh_system_prompt(self, user_text: str) -> None:
         patterns = await self.memory.search_patterns(user_text, limit=6) if user_text else []
         facts = await self.memory.all_facts()
-        prompt = build_system_prompt(
-            registry=self.registry,
-            patterns=patterns,
-            facts=facts,
-            provider_label=self.provider.name,
-            model_label=self.provider.model,
-            interface=self.interface,
-            last_user_text=user_text,
-        )
+        if self.subagent_role:
+            prompt = build_subagent_prompt(
+                role=self.subagent_role,
+                registry=self.registry,
+                patterns=patterns,
+                facts=facts,
+                provider_label=self.provider.name,
+                model_label=self.provider.model,
+            )
+        else:
+            prompt = build_system_prompt(
+                registry=self.registry,
+                patterns=patterns,
+                facts=facts,
+                provider_label=self.provider.name,
+                model_label=self.provider.model,
+                interface=self.interface,
+                last_user_text=user_text,
+            )
         self.context.set_system(prompt)
 
     # ------------------------------------------------------------------
@@ -92,7 +108,7 @@ class Agent:
         self.context.add_user(user_text, pinned=True)
 
         result = TurnResult()
-        for it in range(1, settings.max_iterations + 1):
+        for it in range(1, self.max_iterations + 1):
             result.iterations = it
             self.context.compact()
 

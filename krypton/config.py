@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     # Raise it if you enable reasoning or need very long single answers.
     max_response_tokens: int = Field(default=2048, alias="KRYPTON_MAX_RESPONSE_TOKENS")
 
+    # ---- subagent orchestration ---------------------------------------
+    # How many specialist workers may run at once, in total per spawn, and how
+    # many think->act iterations each worker gets (kept low — workers are focused).
+    subagent_max_parallel: int = Field(default=3, alias="KRYPTON_SUBAGENT_MAX_PARALLEL")
+    subagent_max_workers: int = Field(default=6, alias="KRYPTON_SUBAGENT_MAX_WORKERS")
+    subagent_max_iterations: int = Field(default=12, alias="KRYPTON_SUBAGENT_MAX_ITERATIONS")
+
     @field_validator("workdir", "data_dir", mode="before")
     @classmethod
     def _expand(cls, v):
