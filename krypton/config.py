@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     nvidia_api_key: str = Field(default="", alias="NVIDIA_API_KEY")
     nvidia_model: str = Field(default="nvidia/nemotron-3-super-120b-a12b", alias="NVIDIA_MODEL")
     nvidia_base_url: str = Field(default="https://integrate.api.nvidia.com/v1", alias="NVIDIA_BASE_URL")
-    # one of: none | low | medium | high  (or empty for model default)
-    nvidia_reasoning_effort: str = Field(default="low", alias="NVIDIA_REASONING_EFFORT")
+    # one of: none | low | medium | high  (empty = OFF, max model compatibility)
+    nvidia_reasoning_effort: str = Field(default="", alias="NVIDIA_REASONING_EFFORT")
 
     # ---- telegram ------------------------------------------------------
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")

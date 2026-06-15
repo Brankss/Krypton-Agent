@@ -109,26 +109,22 @@ class NvidiaProvider(LLMProvider):
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        # --- reasoning controls ---
-        # We send BOTH conventions so a single setting works across the
-        # heterogeneous NIM catalog:
-        #   * reasoning_effort=<low|medium|high>   (Nemotron, gpt-oss)
-        #   * chat_template_kwargs.thinking=bool    (Kimi K2.6, Qwen3)
-        # Models ignore unknown fields, so this is safe.
+        # --- reasoning controls (OPT-IN, model-agnostic) ---
+        # By default we send a PLAIN OpenAI-compatible request that works with
+        # ANY NIM model (Nemotron, Kimi, MiniMax, DeepSeek, GLM, ...). Only when
+        # an explicit effort level is set do we add the *standard* reasoning_effort
+        # field. We deliberately do NOT auto-inject the non-standard
+        # `chat_template_kwargs.thinking` (a Kimi/Qwen3 convention): on models
+        # that don't expect it, it makes them reject the request or dump the whole
+        # answer into the hidden reasoning channel — which surfaces as "(no answer)".
+        # Power users who need it for a specific model can still pass it via extra_body.
         eff = self._reasoning_effort
-        if eff is not None:
-            ctk: dict[str, Any] = {"thinking": eff != "none"}
-            if eff in ("low", "medium", "high"):
-                payload["reasoning_effort"] = eff
-            payload["chat_template_kwargs"] = ctk
+        if eff in ("low", "medium", "high"):
+            payload["reasoning_effort"] = eff
 
-        # explicit extra_body wins — merges on top
+        # explicit per-request/model overrides win
         if self.extra_body:
-            user_ctk = self.extra_body.get("chat_template_kwargs") or {}
-            merged_ctk = {**(payload.get("chat_template_kwargs") or {}), **user_ctk}
-            payload.update({k: v for k, v in self.extra_body.items() if k != "chat_template_kwargs"})
-            if merged_ctk:
-                payload["chat_template_kwargs"] = merged_ctk
+            payload.update(self.extra_body)
 
         return payload
 
@@ -152,6 +148,8 @@ class NvidiaProvider(LLMProvider):
         # DeepSeek variants embed inside the regular `content` field.
         in_inline_think = False
         content_carry = ""
+        emitted_content = False
+        reasoning_buf: list[str] = []
 
         url = f"{self._base}/chat/completions"
         async with self._client.stream("POST", url, json=payload) as resp:
@@ -174,9 +172,11 @@ class NvidiaProvider(LLMProvider):
                 delta = choice.get("delta") or {}
 
                 # `reasoning_content` is the model's private chain-of-thought
-                # (DeepSeek-R1 / Nemotron / gpt-oss). We silently consume it —
-                # the user only wants the final answer.
-                _ = delta.get("reasoning_content")
+                # (DeepSeek-R1 / Nemotron / MiniMax ...). We don't show it, but we
+                # keep it as a fallback: some models put EVERYTHING here and leave
+                # `content` empty, which would otherwise surface as "(no answer)".
+                if (rc := delta.get("reasoning_content")):
+                    reasoning_buf.append(rc)
 
                 # Content channel — strip inline <think>...</think> blocks
                 # before forwarding. Carry partial tokens across chunks so we
@@ -186,6 +186,7 @@ class NvidiaProvider(LLMProvider):
                         txt, in_inline_think, content_carry
                     )
                     if clean:
+                        emitted_content = True
                         yield TextDelta(clean)
 
                 for tc in delta.get("tool_calls") or []:
@@ -227,6 +228,12 @@ class NvidiaProvider(LLMProvider):
 
         # flush any trailing carry that wasn't a tag prefix after all
         if content_carry and not in_inline_think:
+            emitted_content = True
             yield TextDelta(content_carry)
+
+        # Fallback: the model produced no visible content and no tool calls but
+        # did reason — surface the reasoning so the turn is never "(no answer)".
+        if not emitted_content and not buf and reasoning_buf:
+            yield TextDelta("".join(reasoning_buf).strip())
 
         yield Done(finish_reason=finish_reason, usage=usage)
