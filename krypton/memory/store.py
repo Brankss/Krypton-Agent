@@ -92,10 +92,16 @@ CREATE TABLE IF NOT EXISTS schedules (
     created_at       REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sched_due ON schedules(enabled, next_run);
+
+CREATE TABLE IF NOT EXISTS prefs (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  REAL NOT NULL
+);
 """
 
 
-SCHEMA_VERSION = 3  # bump when _SCHEMA changes and add a migration step in _migrate
+SCHEMA_VERSION = 4  # bump when _SCHEMA changes and add a migration step in _migrate
 
 
 class MemoryStore:
@@ -425,6 +431,42 @@ class MemoryStore:
             params.append(chat_id)
         async with self._lock:
             cur = await asyncio.to_thread(self._conn.execute, q, tuple(params))
+            return cur.rowcount > 0
+
+    # ----- prefs (durable runtime config: provider / model / reasoning) -
+    def load_prefs_sync(self) -> dict[str, str]:
+        """Synchronous read for the startup path (build_agent is sync). Lets a
+        user's live /provider /model /reasoning choices survive restarts."""
+        try:
+            rows = self._conn.execute("SELECT key, value FROM prefs").fetchall()
+            return {r["key"]: r["value"] for r in rows}
+        except Exception:  # noqa: BLE001 - never let a stale DB block startup
+            return {}
+
+    async def set_pref(self, key: str, value: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._conn.execute,
+                "INSERT INTO prefs(key,value,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, value, time.time()),
+            )
+
+    async def get_pref(self, key: str) -> str | None:
+        row = await asyncio.to_thread(
+            lambda: self._conn.execute("SELECT value FROM prefs WHERE key=?", (key,)).fetchone()
+        )
+        return row["value"] if row else None
+
+    async def all_prefs(self) -> dict[str, str]:
+        rows = await asyncio.to_thread(
+            lambda: self._conn.execute("SELECT key, value FROM prefs").fetchall()
+        )
+        return {r["key"]: r["value"] for r in rows}
+
+    async def delete_pref(self, key: str) -> bool:
+        async with self._lock:
+            cur = await asyncio.to_thread(self._conn.execute, "DELETE FROM prefs WHERE key=?", (key,))
             return cur.rowcount > 0
 
     async def aclose(self) -> None:

@@ -167,6 +167,7 @@ _HELP = (
     "Krypton online.\n\n"
     "Send me text, files, photos, or voice notes.\n\n"
     "Commands:\n"
+    "  /config   show provider / model / reasoning (persisted)\n"
     "  /status   show provider / model / context size\n"
     "  /reset    clear conversation memory (RAM + DB)\n"
     "  /stop     interrupt the current turn\n"
@@ -265,7 +266,10 @@ async def _cmd_provider(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await sess.agent.provider.aclose()
     sess.agent.provider = new_p
-    await update.message.reply_text(f"provider -> {new_p.name} ({new_p.model})")
+    # persist so the choice survives restarts / auto-deploys (provider+model paired)
+    await sess.agent.memory.set_pref("provider", new_p.name)
+    await sess.agent.memory.set_pref("model", new_p.model)
+    await update.message.reply_text(f"provider -> {new_p.name} ({new_p.model})  ·  saved ✓")
 
 
 async def _cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -276,7 +280,9 @@ async def _cmd_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"current: {sess.agent.provider.model}")
         return
     sess.agent.provider.model = ctx.args[0]
-    await update.message.reply_text(f"model -> {sess.agent.provider.model}")
+    await sess.agent.memory.set_pref("provider", sess.agent.provider.name)
+    await sess.agent.memory.set_pref("model", sess.agent.provider.model)
+    await update.message.reply_text(f"model -> {sess.agent.provider.model}  ·  saved ✓")
 
 
 async def _cmd_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -290,6 +296,27 @@ async def _cmd_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"context:   ~{sess.agent.context.token_count} tokens, "
         f"{sess.agent.context.entry_count} entries\n"
         f"in-flight: {in_flight}"
+    )
+
+
+async def _cmd_config(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the effective provider / model / reasoning — all of which persist
+    across restarts and auto-deploys once you set them."""
+    if not _authorized(update):
+        return
+    sess = _get_session(update.effective_chat.id)
+    prov = sess.agent.provider
+    reasoning = getattr(prov, "reasoning_effort", None) or "off"
+    prefs = await sess.agent.memory.all_prefs()
+    saved = ", ".join(f"{k}={v or '∅'}" for k, v in sorted(prefs.items())) or "(none yet)"
+    await update.message.reply_text(
+        "⚙️ config (persists across restarts):\n"
+        f"  provider:  {prov.name}\n"
+        f"  model:     {prov.model}\n"
+        f"  reasoning: {reasoning}\n"
+        f"  saved:     {saved}\n\n"
+        "Change with /provider <name>, /model <id>, /reasoning <none|low|medium|high>.\n"
+        "Tip: leave reasoning OFF for speed; turn it up only for hard analysis."
     )
 
 
@@ -329,7 +356,10 @@ async def _cmd_reasoning(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     except ValueError as e:
         await update.message.reply_text(f"{e}")
         return
-    await update.message.reply_text(f"reasoning_effort -> {prov.reasoning_effort}")  # type: ignore[attr-defined]
+    await sess.agent.memory.set_pref("reasoning", prov.reasoning_effort or "")  # type: ignore[attr-defined]
+    await update.message.reply_text(
+        f"reasoning_effort -> {prov.reasoning_effort or 'off'}  ·  saved ✓"  # type: ignore[attr-defined]
+    )
 
 
 async def _cmd_reboot(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -832,6 +862,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("provider", _cmd_provider))
     app.add_handler(CommandHandler("model", _cmd_model))
     app.add_handler(CommandHandler("status", _cmd_status))
+    app.add_handler(CommandHandler("config", _cmd_config))
     app.add_handler(CommandHandler("reasoning", _cmd_reasoning))
     app.add_handler(CommandHandler("thinking", _cmd_reasoning))  # alias
     app.add_handler(CommandHandler("reboot", _cmd_reboot))

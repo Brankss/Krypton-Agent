@@ -120,7 +120,9 @@ async def _handle_command(line: str, agent: Agent) -> bool | None:
             return True
         await agent.provider.aclose()
         agent.provider = new_p
-        console.print(f"[green]provider -> {new_p.name} ({new_p.model})[/]")
+        await agent.memory.set_pref("provider", new_p.name)
+        await agent.memory.set_pref("model", new_p.model)
+        console.print(f"[green]provider -> {new_p.name} ({new_p.model})  · saved[/]")
         return True
 
     if cmd == "/model":
@@ -128,7 +130,39 @@ async def _handle_command(line: str, agent: Agent) -> bool | None:
             console.print(f"current: {agent.provider.model}")
             return True
         agent.provider.model = rest[0]
-        console.print(f"[green]model -> {agent.provider.model}[/]")
+        await agent.memory.set_pref("provider", agent.provider.name)
+        await agent.memory.set_pref("model", agent.provider.model)
+        console.print(f"[green]model -> {agent.provider.model}  · saved[/]")
+        return True
+
+    if cmd == "/reasoning":
+        prov = agent.provider
+        if not hasattr(prov, "reasoning_effort"):
+            console.print(f"[yellow]provider '{prov.name}' has no reasoning knob[/]")
+            return True
+        if not rest:
+            console.print(f"reasoning: {getattr(prov, 'reasoning_effort', None) or 'off'}")
+            return True
+        arg = {"off": "none", "on": "low"}.get(rest[0].lower(), rest[0].lower())
+        try:
+            prov.reasoning_effort = arg  # type: ignore[attr-defined]
+        except ValueError as e:
+            console.print(f"[red]{e}[/]")
+            return True
+        await agent.memory.set_pref("reasoning", prov.reasoning_effort or "")  # type: ignore[attr-defined]
+        console.print(f"[green]reasoning -> {prov.reasoning_effort or 'off'}  · saved[/]")  # type: ignore[attr-defined]
+        return True
+
+    if cmd == "/config":
+        prov = agent.provider
+        prefs = await agent.memory.all_prefs()
+        saved = ", ".join(f"{k}={v or '∅'}" for k, v in sorted(prefs.items())) or "(none)"
+        console.print(
+            f"provider:  {prov.name}\n"
+            f"model:     {prov.model}\n"
+            f"reasoning: {getattr(prov, 'reasoning_effort', None) or 'off'}\n"
+            f"[dim]saved (persists): {saved}[/]"
+        )
         return True
 
     if cmd == "/patterns":
@@ -158,9 +192,11 @@ async def _handle_command(line: str, agent: Agent) -> bool | None:
     if cmd == "/help":
         console.print(
             Markdown(
-                "**Commands**\n\n"
+                "**Commands** (provider/model/reasoning persist across restarts)\n\n"
                 "- `/provider <ollama_local|ollama_cloud|openrouter|nvidia>`\n"
                 "- `/model <name>`\n"
+                "- `/reasoning <none|low|medium|high>`\n"
+                "- `/config` show effective + saved config\n"
                 "- `/status` provider, model, context size + tool stats\n"
                 "- `/reset` clear conversation\n"
                 "- `/patterns` list learned patterns\n"

@@ -38,6 +38,32 @@ def _make_worker_registry(memory: MemoryStore):
     return reg
 
 
+def _build_provider_with_prefs(provider_name: ProviderName | None, prefs: dict[str, str]):
+    """Resolve the provider with precedence: explicit arg > saved pref > .env.
+    Then apply the user's persisted model / reasoning so live choices survive
+    restarts and auto-deploys. Stale/invalid prefs fall back gracefully."""
+    pref_provider = prefs.get("provider")
+    chosen: str = provider_name or pref_provider or settings.provider
+    try:
+        provider = build_provider(chosen)  # may raise (unknown provider / missing key)
+    except Exception:  # noqa: BLE001
+        chosen = settings.provider
+        provider = build_provider(settings.provider)
+
+    # model pref applies only when the active provider matches the one it was
+    # saved under (commands keep provider+model paired).
+    if prefs.get("model") and chosen == pref_provider:
+        provider.model = prefs["model"]
+
+    reasoning = prefs.get("reasoning")
+    if reasoning is not None and hasattr(provider, "reasoning_effort"):
+        try:
+            provider.reasoning_effort = reasoning  # validates; "" -> off
+        except Exception:  # noqa: BLE001
+            pass
+    return provider
+
+
 def build_agent(
     provider_name: ProviderName | None = None,
     *,
@@ -54,7 +80,9 @@ def build_agent(
     if extra_tools:
         registry.register_many(extra_tools)
 
-    provider = build_provider(provider_name)
+    # Apply the user's persisted provider/model/reasoning over .env defaults so
+    # live /provider /model /reasoning choices survive restarts and auto-deploys.
+    provider = _build_provider_with_prefs(provider_name, memory.load_prefs_sync())
     ctx = ConversationContext(target_budget=settings.context_budget)
 
     agent = Agent(
